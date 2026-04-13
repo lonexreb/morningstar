@@ -9,11 +9,31 @@ description = "Autonomous coding agent powered by Claude Code"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+authors = [
+    { name = "Shubhankar Tripathy" },
+]
+keywords = ["ai", "agent", "claude", "coding", "automation", "notion"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Code Generators",
+]
 dependencies = [
     "typer>=0.15.0,<1.0",
     "rich>=13.0.0,<15.0",
     "httpx>=0.27.0,<1.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/lonexreb/morningstar"
+Source = "https://github.com/lonexreb/morningstar"
+Issues = "https://github.com/lonexreb/morningstar/issues"
 
 [project.optional-dependencies]
 dev = [

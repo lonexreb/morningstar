@@ -1,10 +1,2 @@
 .env
-__pycache__/
-*.pyc
-.venv/
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
-dist/
-*.egg-info/
-logs/
+.agent-logs/

@@ -7,6 +7,7 @@ import logging
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
@@ -66,6 +67,42 @@ def _validate_session_id(sid: str) -> str | None:
     if sid and _SESSION_ID_RE.match(sid):
         return sid
     return None
+
+
+_BOT_TOKEN_RE = re.compile(r"^xoxb-[A-Za-z0-9\-]+$")
+
+
+def validate_bot_token(token: str) -> str:
+    if not _BOT_TOKEN_RE.match(token):
+        raise ValueError("Bot token must start with xoxb-")
+    return token
+
+
+_QUESTION_RE = re.compile(
+    r"QUESTION:\s*(.+?)(?:\nCONTEXT:|\nDEFAULT:|\Z)",
+    re.DOTALL,
+)
+_CONTEXT_RE = re.compile(r"CONTEXT:\s*(.+?)(?:\nDEFAULT:|\Z)", re.DOTALL)
+_DEFAULT_RE = re.compile(r"DEFAULT:\s*(.+?)(?:\n|\Z)", re.DOTALL)
+
+
+def parse_question_block(text: str) -> tuple[str, str, str] | None:
+    """Parse QUESTION/CONTEXT/DEFAULT from Claude's output.
+
+    Returns (question, context, default) or None if no question found.
+    """
+    q_match = _QUESTION_RE.search(text)
+    if not q_match:
+        return None
+
+    question = q_match.group(1).strip()
+    context_match = _CONTEXT_RE.search(text)
+    default_match = _DEFAULT_RE.search(text)
+
+    context = context_match.group(1).strip() if context_match else ""
+    default = default_match.group(1).strip() if default_match else ""
+
+    return question, context, default
 
 
 # ── Types ─────────────────────────────────────────────────────
@@ -205,6 +242,70 @@ def slack_post(webhook: str, message: str) -> None:
         logger.warning("Slack post failed (HTTP %d): %s", e.response.status_code, e)
     except (httpx.TransportError, httpx.HTTPError) as e:
         logger.warning("Slack post failed: %s", e)
+
+
+def slack_post_and_get_reply(
+    bot_token: str,
+    channel: str,
+    question: str,
+    *,
+    timeout_sec: int = 300,
+    poll_interval: int = 30,
+) -> str | None:
+    """Post a question to Slack and poll for a human reply.
+
+    Posts the question as a message, then polls the thread for replies.
+    Returns the first human reply text, or None on timeout.
+    """
+    headers = {"Authorization": f"Bearer {bot_token}"}
+
+    # Post the question
+    try:
+        post_resp = httpx.post(
+            "https://slack.com/api/chat.postMessage",
+            json={"channel": channel, "text": question},
+            headers=headers,
+            timeout=10,
+        )
+        post_data = post_resp.json()
+        if not post_data.get("ok"):
+            logger.warning("Slack postMessage failed: %s", post_data.get("error"))
+            return None
+        thread_ts = post_data["ts"]
+    except (httpx.HTTPError, httpx.TransportError, KeyError) as e:
+        logger.warning("Slack postMessage error: %s", e)
+        return None
+
+    # Poll for replies
+    elapsed = 0
+    while elapsed < timeout_sec:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+
+        try:
+            replies_resp = httpx.get(
+                "https://slack.com/api/conversations.replies",
+                params={"channel": channel, "ts": thread_ts},
+                headers=headers,
+                timeout=10,
+            )
+            replies_data = replies_resp.json()
+            if not replies_data.get("ok"):
+                logger.warning("Slack replies failed: %s", replies_data.get("error"))
+                continue
+
+            messages = replies_data.get("messages", [])
+            # First message is the original post; replies start at index 1
+            for msg in messages[1:]:
+                reply_text = msg.get("text", "").strip()
+                if reply_text:
+                    return reply_text
+
+        except (httpx.HTTPError, httpx.TransportError) as e:
+            logger.warning("Slack poll error: %s", e)
+            continue
+
+    return None
 
 
 # ── Step 1: Fetch PRD ────────────────────────────────────────
@@ -350,6 +451,10 @@ def execute_task(
     model: str,
     budget_per_task: float,
     log_dir: Path,
+    bot_token: str | None = None,
+    slack_channel: str | None = None,
+    slack_webhook: str | None = None,
+    question_timeout: int = 300,
 ) -> TaskResult:
     """Execute a single task."""
     task_id = _sanitize_task_id(task["id"])
@@ -391,6 +496,50 @@ def execute_task(
     session_id = result.get("session_id", "")
 
     (log_dir / f"task-{task_id}.json").write_text(json.dumps(result, indent=2))
+
+    # Check for QUESTION block in output -- ask in Slack if bot token available
+    result_text = result.get("result", "")
+    question_block = parse_question_block(result_text)
+    if question_block and not is_error:
+        q_text, q_context, q_default = question_block
+        slack_question = f"*{title}* needs input:\n\n> {q_text}"
+        if q_context:
+            slack_question += f"\n\nContext: {q_context}"
+        if q_default:
+            slack_question += f"\n\nDefault (if no reply in {question_timeout // 60}min): {q_default}"
+
+        if bot_token and slack_channel:
+            logger.info("Posting question to Slack for task %s", task_id)
+            answer = slack_post_and_get_reply(
+                bot_token, slack_channel, slack_question,
+                timeout_sec=question_timeout,
+            )
+            if answer:
+                logger.info("Got Slack answer for task %s: %s", task_id, answer[:100])
+                followup = _run_claude(
+                    f"A human answered your question.\n\n"
+                    f"Question: {q_text}\n"
+                    f"Answer: {answer}\n\n"
+                    f"Continue implementing the task with this answer in mind.",
+                    cwd=repo_path,
+                    model=model,
+                    budget=3.0,
+                    tools="Read,Write,Edit,Bash,Glob,Grep",
+                    resume=_validate_session_id(session_id),
+                )
+                followup_cost = float(followup.get("total_cost_usd", 0))
+                cost += followup_cost
+                is_error = followup.get("is_error", False)
+                (log_dir / f"task-{task_id}-answer.json").write_text(
+                    json.dumps(followup, indent=2)
+                )
+            else:
+                logger.info("No Slack answer for task %s, using default: %s", task_id, q_default)
+        else:
+            # No bot token -- log question and notify via webhook
+            logger.info("Question from task %s (no bot token): %s", task_id, q_text)
+            if slack_webhook:
+                slack_post(slack_webhook, slack_question + "\n\n_(No bot token -- proceeding with default)_")
 
     # Retry once on error with session context
     validated_sid = _validate_session_id(session_id)

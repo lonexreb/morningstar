@@ -18,6 +18,7 @@ from morningstar.engine import (
     fetch_prd,
     generate_tasks,
     slack_post,
+    validate_bot_token,
     validate_model,
     validate_slack_webhook,
 )
@@ -93,6 +94,25 @@ def run(
         max=100,
         help="Maximum number of tasks to generate.",
     ),
+    slack_bot_token: str = typer.Option(
+        None,
+        "--slack-bot-token",
+        envvar="MORNINGSTAR_SLACK_BOT_TOKEN",
+        help="Slack bot token (xoxb-...) for two-way Q&A. Prefer env var.",
+    ),
+    slack_channel: str = typer.Option(
+        None,
+        "--slack-channel",
+        envvar="MORNINGSTAR_SLACK_CHANNEL",
+        help="Slack channel ID for posting questions (e.g. C0A2DMV8JNB).",
+    ),
+    question_timeout: int = typer.Option(
+        300,
+        "--question-timeout",
+        min=30,
+        max=1800,
+        help="Seconds to wait for Slack answer (default 300).",
+    ),
 ) -> None:
     """Run the autonomous coding agent.
 
@@ -120,6 +140,20 @@ def run(
     except ValueError as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
         raise typer.Exit(1)
+
+    if slack_bot_token:
+        try:
+            validate_bot_token(slack_bot_token)
+        except ValueError as e:
+            console.print(f"[bold red]Error:[/bold red] {e}")
+            raise typer.Exit(1)
+        if not slack_channel:
+            console.print(
+                "[bold red]Error:[/bold red] --slack-channel is required when "
+                "using --slack-bot-token. Set MORNINGSTAR_SLACK_CHANNEL env var."
+            )
+            raise typer.Exit(1)
+        console.print("  [cyan]Two-way Slack enabled[/cyan] -- will ask questions in channel")
 
     log_dir = repo / ".agent-logs"
     log_dir.mkdir(exist_ok=True)
@@ -240,6 +274,10 @@ def run(
                 model=model,
                 budget_per_task=budget_per_task,
                 log_dir=log_dir,
+                bot_token=slack_bot_token,
+                slack_channel=slack_channel,
+                slack_webhook=slack_webhook,
+                question_timeout=question_timeout,
             )
 
             state.cost += result.cost

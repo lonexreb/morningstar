@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import logging
 import re
@@ -612,3 +613,606 @@ def _git_commit(repo_path: Path, title: str, task_id: str) -> None:
         logger.warning("git operation timed out in %s", repo_path)
     except FileNotFoundError:
         logger.warning("git not found -- skipping commit")
+
+
+# ── Queue processing (24/7 mode) ─────────────────────────────
+
+_NOTION_URL_IN_TEXT_RE = re.compile(
+    r"https?://(?:www\.)?notion\.so/[^\s)\]]+",
+    re.IGNORECASE,
+)
+_NOTION_DB_ID_RE = re.compile(r"^[0-9a-f]{32}$|^[0-9a-f\-]{36}$")
+_JIRA_URL_RE = re.compile(r"^https?://[a-zA-Z0-9.\-]+/?$")
+_JIRA_PROJECT_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,9}$")
+_NOTION_TOKEN_RE = re.compile(r"^(?:secret_|ntn_)[A-Za-z0-9_\-]{20,}$")
+_GH_REPO_RE = re.compile(r"^[A-Za-z0-9._\-]+/[A-Za-z0-9._\-]+$")
+
+
+def validate_notion_db_id(db_id: str) -> str:
+    if not _NOTION_DB_ID_RE.match(db_id.replace("-", "")):
+        raise ValueError("Notion DB ID must be 32 hex chars (with or without dashes)")
+    return db_id
+
+
+def validate_notion_token(token: str) -> str:
+    if not _NOTION_TOKEN_RE.match(token):
+        raise ValueError("Notion token must start with 'secret_' or 'ntn_'")
+    return token
+
+
+def validate_jira_url(url: str) -> str:
+    if not _JIRA_URL_RE.match(url):
+        raise ValueError("Jira URL must be https://your-org.atlassian.net")
+    return url.rstrip("/")
+
+
+def validate_jira_project_key(key: str) -> str:
+    if not _JIRA_PROJECT_KEY_RE.match(key):
+        raise ValueError("Jira project key must be 2-10 uppercase letters/digits")
+    return key
+
+
+def validate_gh_repo(repo: str) -> str:
+    if not _GH_REPO_RE.match(repo):
+        raise ValueError("GitHub repo must be 'owner/name'")
+    return repo
+
+
+@dataclass(frozen=True)
+class PendingItem:
+    """One unit of work pulled from the Notion DB or Jira.
+
+    `prd_url` is a Notion URL or page ID usable by fetch_prd(). For Jira items
+    this is typically extracted from the ticket description; if none is found,
+    the ticket description itself is treated as the PRD via `inline_prd_text`.
+    """
+
+    source: str  # "notion" | "jira"
+    source_id: str  # notion page_id | jira issue key
+    title: str
+    prd_url: str = ""
+    inline_prd_text: str = ""
+
+
+# ── Notion API ───────────────────────────────────────────────
+
+_NOTION_API = "https://api.notion.com/v1"
+_NOTION_VERSION = "2022-06-28"
+
+
+def fetch_pending_notion(
+    db_id: str,
+    token: str,
+    *,
+    status_property: str = "Status",
+    pending_value: str = "Pending",
+) -> list[PendingItem]:
+    """Query a Notion database for rows where Status = Pending.
+
+    The database is expected to have:
+      - a 'Status' select property with 'Pending' as one value
+      - a title property (used as `title`)
+      - either a URL column 'Notion URL' OR the row's own URL used as PRD source
+    """
+    validate_notion_db_id(db_id)
+    validate_notion_token(token)
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Notion-Version": _NOTION_VERSION,
+        "Content-Type": "application/json",
+    }
+    body = {
+        "filter": {
+            "property": status_property,
+            "select": {"equals": pending_value},
+        },
+        "page_size": 50,
+    }
+
+    try:
+        resp = httpx.post(
+            f"{_NOTION_API}/databases/{db_id}/query",
+            headers=headers,
+            json=body,
+            timeout=15,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as e:
+        logger.warning("Notion query failed: %s", e)
+        return []
+
+    items: list[PendingItem] = []
+    for row in resp.json().get("results", []):
+        page_id = row.get("id", "")
+        props = row.get("properties", {})
+
+        title = ""
+        for _, prop in props.items():
+            if prop.get("type") == "title":
+                chunks = prop.get("title", [])
+                title = "".join(c.get("plain_text", "") for c in chunks)
+                break
+
+        prd_url = row.get("url", "")
+        url_prop = props.get("Notion URL") or props.get("PRD URL")
+        if url_prop and url_prop.get("type") == "url" and url_prop.get("url"):
+            prd_url = url_prop["url"]
+
+        items.append(PendingItem(
+            source="notion",
+            source_id=page_id,
+            title=title or "(untitled)",
+            prd_url=prd_url,
+        ))
+    return items
+
+
+def set_notion_status(
+    page_id: str,
+    token: str,
+    status: str,
+    *,
+    status_property: str = "Status",
+    pr_url: str | None = None,
+    notes: str | None = None,
+) -> bool:
+    """Update a Notion row's Status (and optionally PR URL / Notes)."""
+    validate_notion_token(token)
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Notion-Version": _NOTION_VERSION,
+        "Content-Type": "application/json",
+    }
+    properties: dict = {
+        status_property: {"select": {"name": status}},
+    }
+    if pr_url:
+        properties["PR"] = {"url": pr_url}
+    if notes:
+        properties["Notes"] = {
+            "rich_text": [{"text": {"content": notes[:1900]}}],
+        }
+
+    try:
+        resp = httpx.patch(
+            f"{_NOTION_API}/pages/{page_id}",
+            headers=headers,
+            json={"properties": properties},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return True
+    except httpx.HTTPError as e:
+        logger.warning("Notion status update failed for %s: %s", page_id, e)
+        return False
+
+
+# ── Jira API ─────────────────────────────────────────────────
+
+def fetch_pending_jira(
+    base_url: str,
+    project_key: str,
+    email: str,
+    token: str,
+    *,
+    label: str = "morningstar",
+    pending_status: str = "To Do",
+) -> list[PendingItem]:
+    """Query Jira for tickets with the given label in Pending status."""
+    base_url = validate_jira_url(base_url)
+    validate_jira_project_key(project_key)
+
+    jql = (
+        f'project = {project_key} AND labels = "{label}" '
+        f'AND status = "{pending_status}"'
+    )
+    try:
+        resp = httpx.get(
+            f"{base_url}/rest/api/3/search",
+            auth=(email, token),
+            params={"jql": jql, "maxResults": 50, "fields": "summary,description"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as e:
+        logger.warning("Jira search failed: %s", e)
+        return []
+
+    items: list[PendingItem] = []
+    for issue in resp.json().get("issues", []):
+        key = issue.get("key", "")
+        fields = issue.get("fields", {})
+        title = fields.get("summary", "") or "(untitled)"
+
+        desc = fields.get("description") or ""
+        if isinstance(desc, dict):
+            desc = json.dumps(desc)
+
+        url_match = _NOTION_URL_IN_TEXT_RE.search(desc)
+        prd_url = url_match.group(0) if url_match else ""
+
+        items.append(PendingItem(
+            source="jira",
+            source_id=key,
+            title=title,
+            prd_url=prd_url,
+            inline_prd_text="" if prd_url else desc,
+        ))
+    return items
+
+
+def set_jira_status(
+    base_url: str,
+    issue_key: str,
+    email: str,
+    token: str,
+    transition_name: str,
+) -> bool:
+    """Transition a Jira ticket by transition name (e.g. 'In Progress', 'Done')."""
+    base_url = validate_jira_url(base_url)
+
+    try:
+        list_resp = httpx.get(
+            f"{base_url}/rest/api/3/issue/{issue_key}/transitions",
+            auth=(email, token),
+            timeout=15,
+        )
+        list_resp.raise_for_status()
+        wanted = None
+        for tr in list_resp.json().get("transitions", []):
+            if tr.get("name", "").lower() == transition_name.lower():
+                wanted = tr.get("id")
+                break
+        if not wanted:
+            logger.warning("Jira transition '%s' not available for %s", transition_name, issue_key)
+            return False
+
+        resp = httpx.post(
+            f"{base_url}/rest/api/3/issue/{issue_key}/transitions",
+            auth=(email, token),
+            json={"transition": {"id": wanted}},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return True
+    except httpx.HTTPError as e:
+        logger.warning("Jira transition failed for %s: %s", issue_key, e)
+        return False
+
+
+# ── GitHub PR ────────────────────────────────────────────────
+
+def open_github_pr(
+    repo_path: Path,
+    branch: str,
+    title: str,
+    body: str,
+    *,
+    base: str = "main",
+) -> str | None:
+    """Push branch and open a PR via `gh`. Returns PR URL or None."""
+    try:
+        push = subprocess.run(
+            ["git", "push", "-u", "origin", branch],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if push.returncode != 0:
+            logger.warning("git push failed: %s", push.stderr)
+            return None
+
+        create = subprocess.run(
+            [
+                "gh", "pr", "create",
+                "--title", title,
+                "--body", body,
+                "--base", base,
+                "--head", branch,
+            ],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if create.returncode != 0:
+            logger.warning("gh pr create failed: %s", create.stderr)
+            return None
+
+        url = create.stdout.strip().splitlines()[-1] if create.stdout else ""
+        return url or None
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        logger.warning("PR creation error: %s", e)
+        return None
+
+
+# ── Weekly budget tracker ────────────────────────────────────
+
+def _iso_week_key(now: _dt.datetime | None = None) -> str:
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    iso = now.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
+
+
+def read_weekly_spend(repo_path: Path) -> tuple[str, float]:
+    """Return (current_week_key, spend_so_far)."""
+    path = repo_path / ".morningstar" / "weekly-spend.json"
+    key = _iso_week_key()
+    if not path.exists():
+        return key, 0.0
+    try:
+        data = json.loads(path.read_text())
+        if data.get("week") == key:
+            return key, float(data.get("spend", 0.0))
+        return key, 0.0
+    except (json.JSONDecodeError, OSError, ValueError):
+        return key, 0.0
+
+
+def write_weekly_spend(repo_path: Path, week_key: str, spend: float) -> None:
+    path = repo_path / ".morningstar" / "weekly-spend.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"week": week_key, "spend": round(spend, 4)}, indent=2))
+    tmp.replace(path)
+
+
+# ── Queue orchestrator ───────────────────────────────────────
+
+@dataclass
+class QueueConfig:
+    """Configuration for a queue-processing run. Mutable -- tweaked at CLI layer."""
+
+    repo_path: Path
+    model: str = "sonnet"
+    per_run_budget: float = 25.0
+    per_task_budget: float = 5.0
+    weekly_budget: float = 200.0
+    max_tasks: int = 20
+    # Source config -- either side may be empty
+    notion_db_id: str = ""
+    notion_token: str = ""
+    jira_url: str = ""
+    jira_email: str = ""
+    jira_token: str = ""
+    jira_project_key: str = ""
+    jira_label: str = "morningstar"
+    # Delivery
+    gh_repo: str = ""  # owner/name -- for PR creation
+    base_branch: str = "main"
+    slack_webhook: str = ""
+    slack_bot_token: str = ""
+    slack_channel: str = ""
+    question_timeout: int = 300
+    dry_run: bool = False
+
+
+@dataclass
+class QueueResult:
+    """Summary of a queue-processing run. Mutable -- accumulated in the loop."""
+
+    scanned: int = 0
+    processed: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    skipped: int = 0
+    total_cost: float = 0.0
+    prs_opened: list[str] = field(default_factory=list)
+
+
+def _run_branch_for(item: PendingItem) -> str:
+    token = _sanitize_task_id(item.source_id).lower()
+    return f"morningstar/{item.source}-{token}"[:80]
+
+
+def _prepare_branch(repo_path: Path, branch: str) -> bool:
+    """Create and check out a fresh branch from the current HEAD. Returns success."""
+    try:
+        subprocess.run(
+            ["git", "checkout", "-B", branch],
+            cwd=str(repo_path),
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+        logger.warning("branch prep failed for %s: %s", branch, e)
+        return False
+
+
+def _mark_item(
+    item: PendingItem,
+    cfg: QueueConfig,
+    status: str,
+    *,
+    pr_url: str | None = None,
+    notes: str | None = None,
+) -> None:
+    """Update the source system with the item's new status."""
+    if item.source == "notion" and cfg.notion_token:
+        set_notion_status(
+            item.source_id, cfg.notion_token, status,
+            pr_url=pr_url, notes=notes,
+        )
+    elif item.source == "jira" and cfg.jira_url and cfg.jira_email and cfg.jira_token:
+        set_jira_status(
+            cfg.jira_url, item.source_id,
+            cfg.jira_email, cfg.jira_token,
+            status,
+        )
+
+
+def _gather_pending(cfg: QueueConfig) -> list[PendingItem]:
+    items: list[PendingItem] = []
+    if cfg.notion_db_id and cfg.notion_token:
+        items.extend(fetch_pending_notion(cfg.notion_db_id, cfg.notion_token))
+    if cfg.jira_url and cfg.jira_project_key and cfg.jira_email and cfg.jira_token:
+        items.extend(fetch_pending_jira(
+            cfg.jira_url, cfg.jira_project_key,
+            cfg.jira_email, cfg.jira_token,
+            label=cfg.jira_label,
+        ))
+    return items
+
+
+def process_queue(cfg: QueueConfig) -> QueueResult:
+    """Scan Notion + Jira for pending items and run each one end-to-end."""
+    result = QueueResult()
+
+    pending = _gather_pending(cfg)
+    result.scanned = len(pending)
+
+    if not pending:
+        logger.info("No pending items.")
+        if cfg.slack_webhook:
+            slack_post(cfg.slack_webhook, "MorningStar queue: no pending items.")
+        return result
+
+    week_key, spend_so_far = read_weekly_spend(cfg.repo_path)
+    if spend_so_far >= cfg.weekly_budget:
+        msg = (f"Weekly budget exhausted ({spend_so_far:.2f}/{cfg.weekly_budget:.2f} "
+               f"for {week_key}). Skipping run.")
+        logger.warning(msg)
+        if cfg.slack_webhook:
+            slack_post(cfg.slack_webhook, f":warning: {msg}")
+        return result
+
+    if cfg.slack_webhook:
+        slack_post(
+            cfg.slack_webhook,
+            f"MorningStar queue: {result.scanned} item(s) pending. Weekly spend "
+            f"{spend_so_far:.2f}/{cfg.weekly_budget:.2f}.",
+        )
+
+    log_dir = cfg.repo_path / ".agent-logs"
+    log_dir.mkdir(exist_ok=True)
+
+    for item in pending:
+        if cfg.dry_run:
+            logger.info("[dry-run] would process %s:%s %r", item.source, item.source_id, item.title)
+            result.skipped += 1
+            continue
+
+        if result.total_cost + spend_so_far >= cfg.weekly_budget:
+            logger.warning("Weekly budget hit mid-run; stopping.")
+            break
+        if result.total_cost >= cfg.per_run_budget:
+            logger.warning("Per-run budget hit (%.2f); stopping.", cfg.per_run_budget)
+            break
+
+        branch = _run_branch_for(item)
+        _mark_item(item, cfg, "Running")
+
+        if not _prepare_branch(cfg.repo_path, branch):
+            _mark_item(item, cfg, "Failed", notes="Could not create branch")
+            result.failed += 1
+            continue
+
+        item_cost = 0.0
+        pr_url: str | None = None
+        state = RunState()
+        try:
+            if item.prd_url:
+                prd_text, prd_cost = fetch_prd(item.prd_url, model=cfg.model, log_dir=log_dir)
+                item_cost += prd_cost
+            elif item.inline_prd_text:
+                prd_text = item.inline_prd_text
+            else:
+                raise RuntimeError("No PRD URL or inline text on this item")
+
+            tasks, gen_cost = generate_tasks(
+                prd_text,
+                repo_path=cfg.repo_path,
+                model=cfg.model,
+                log_dir=log_dir,
+                max_tasks=cfg.max_tasks,
+            )
+            item_cost += gen_cost
+            state.tasks = tasks
+
+            for task in tasks:
+                if item_cost >= cfg.per_run_budget:
+                    logger.warning("Per-item budget reached; stopping tasks early.")
+                    break
+                tr = execute_task(
+                    task,
+                    repo_path=cfg.repo_path,
+                    model=cfg.model,
+                    budget_per_task=cfg.per_task_budget,
+                    log_dir=log_dir,
+                    bot_token=cfg.slack_bot_token or None,
+                    slack_channel=cfg.slack_channel or None,
+                    slack_webhook=cfg.slack_webhook or None,
+                    question_timeout=cfg.question_timeout,
+                )
+                item_cost += tr.cost
+                if tr.success:
+                    state.completed += 1
+                else:
+                    state.failed += 1
+
+            pr_title = f"morningstar: {item.title}"[:72]
+            pr_body = (
+                f"Source: {item.source}:{item.source_id}\n"
+                f"Completed tasks: {state.completed}\n"
+                f"Failed tasks: {state.failed}\n"
+                f"Cost: ${item_cost:.2f}\n\n"
+                f"_Autogenerated by MorningStar queue processor._"
+            )
+            if cfg.gh_repo:
+                validate_gh_repo(cfg.gh_repo)
+            pr_url = open_github_pr(
+                cfg.repo_path, branch, pr_title, pr_body,
+                base=cfg.base_branch,
+            )
+
+            if state.failed == 0 and state.completed > 0:
+                _mark_item(item, cfg, "Done", pr_url=pr_url,
+                           notes=f"{state.completed} tasks, ${item_cost:.2f}")
+                result.succeeded += 1
+            else:
+                _mark_item(item, cfg, "Failed", pr_url=pr_url,
+                           notes=f"{state.completed} done, {state.failed} failed, "
+                                 f"${item_cost:.2f}")
+                result.failed += 1
+
+        except (RuntimeError, OSError) as e:
+            logger.exception("Item %s failed: %s", item.source_id, e)
+            _mark_item(item, cfg, "Failed", notes=str(e)[:500])
+            result.failed += 1
+
+        result.processed += 1
+        result.total_cost += item_cost
+        if pr_url:
+            result.prs_opened.append(pr_url)
+
+        if cfg.slack_webhook:
+            status_emoji = (
+                ":white_check_mark:"
+                if state.failed == 0 and state.completed > 0
+                else ":x:"
+            )
+            slack_post(
+                cfg.slack_webhook,
+                f"{status_emoji} *{item.title}* "
+                f"({state.completed} done, {state.failed} failed, ${item_cost:.2f})"
+                + (f"\n{pr_url}" if pr_url else ""),
+            )
+
+    write_weekly_spend(cfg.repo_path, week_key, spend_so_far + result.total_cost)
+
+    if cfg.slack_webhook:
+        slack_post(
+            cfg.slack_webhook,
+            f"MorningStar queue run complete: {result.succeeded} succeeded, "
+            f"{result.failed} failed, {result.skipped} skipped. "
+            f"Run cost ${result.total_cost:.2f}. "
+            f"Week {week_key}: ${spend_so_far + result.total_cost:.2f}/"
+            f"${cfg.weekly_budget:.2f}.",
+        )
+
+    return result

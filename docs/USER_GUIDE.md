@@ -591,3 +591,113 @@ Instead of one massive PRD, break your requirements into focused pages:
 - "Email Notifications" -- another run
 
 Smaller, focused PRDs produce better results than kitchen-sink documents.
+
+---
+
+## 24/7 Setup (Scheduled Queue Processor)
+
+MorningStar can run continuously, polling a Notion database and Jira project every 15 minutes, processing any PRDs it finds, and opening PRs against a target repo. This is the path for handoff to an operations team.
+
+### Architecture (summary)
+
+Two cooperating layers:
+
+1. **Executor** -- `.github/workflows/morningstar-scheduled.yml`. Cron every 15 minutes. Runs `morningstar process-queue`, which is the heavy lifter: clone target repo, fetch PRD, plan, implement, push, PR.
+2. **Watcher** -- `/morningstar:watch` skill on Claude Cloud Tasks (hourly). Does a lightweight scan and dispatches the executor. Defense in depth; not required if the GH cron suffices.
+
+### Notion database schema
+
+Create a Notion database with at minimum:
+
+| Column | Type | Values |
+|---|---|---|
+| *Title* (e.g. `Name`) | Title | -- |
+| `Status` | Select | `Pending`, `Running`, `Done`, `Failed` |
+| `PR` | URL | Populated by MorningStar |
+| `Notes` | Rich text | Populated by MorningStar |
+| `Notion URL` or `PRD URL` (optional) | URL | If set, overrides the row URL as PRD source |
+
+Share the DB with your Notion integration (the one whose token you use).
+
+### Jira setup
+
+- Tickets with label `morningstar` in status `To Do` are picked up.
+- If the ticket description contains a Notion URL, that URL is used as the PRD.
+- Otherwise, the description body is used inline.
+- MorningStar transitions: `To Do` → `In Progress` (start) → `Done` / `Failed` (finish).
+
+### GitHub repository configuration
+
+In the repo where the `morningstar-scheduled.yml` workflow lives:
+
+**Variables** (Settings → Secrets and variables → Actions → Variables):
+
+- `MORNINGSTAR_ENV` -- e.g. `prod` or `dev` (picks which environment's secrets apply)
+- `MORNINGSTAR_NOTION_DB_ID`
+- `MORNINGSTAR_JIRA_URL`
+- `MORNINGSTAR_JIRA_PROJECT_KEY`
+- `MORNINGSTAR_WEEKLY_BUDGET` -- USD cap per ISO week
+- `MORNINGSTAR_TARGET_REPO` -- `owner/name` of the repo to modify (optional; if empty the workflow modifies its own repo)
+- `MORNINGSTAR_TARGET_BRANCH` -- default `main`
+
+**Secrets** (same path, on the environment you named in `MORNINGSTAR_ENV`):
+
+- `ANTHROPIC_API_KEY`
+- `MORNINGSTAR_NOTION_TOKEN`
+- `MORNINGSTAR_JIRA_EMAIL`, `MORNINGSTAR_JIRA_TOKEN`
+- `MORNINGSTAR_SLACK_WEBHOOK`
+- `MORNINGSTAR_SLACK_BOT_TOKEN` (optional, for two-way Q&A)
+- `MORNINGSTAR_SLACK_CHANNEL_ID` (optional, for two-way Q&A)
+- `MORNINGSTAR_TARGET_REPO_TOKEN` -- PAT with `repo` + `workflow` scopes on the target repo
+
+### Verify the setup
+
+**Dry-run workflow (manual):**
+
+GitHub UI → Actions → `morningstar-scheduled-dryrun` → Run workflow. This scans the queue and reports counts without executing. Use this first to confirm credentials are wired correctly.
+
+**Real run (manual):**
+
+GitHub UI → Actions → `morningstar-scheduled` → Run workflow.
+
+**Cron:** The workflow fires every 15 minutes. First scheduled fire happens within ~15 min of merging the workflow file to the default branch.
+
+### Running the CLI directly (for debugging)
+
+Locally, with the same env vars exported:
+
+```bash
+morningstar process-queue --dry-run   # preview only
+morningstar process-queue             # full execution
+```
+
+Flags:
+
+| Flag | Env var | Default | Purpose |
+|---|---|---|---|
+| `--repo` | -- | `.` | Target repo path |
+| `--notion-db-id` | `MORNINGSTAR_NOTION_DB_ID` | -- | |
+| `--notion-token` | `MORNINGSTAR_NOTION_TOKEN` | -- | |
+| `--jira-url` | `MORNINGSTAR_JIRA_URL` | -- | |
+| `--jira-email` | `MORNINGSTAR_JIRA_EMAIL` | -- | |
+| `--jira-token` | `MORNINGSTAR_JIRA_TOKEN` | -- | |
+| `--jira-project` | `MORNINGSTAR_JIRA_PROJECT_KEY` | -- | |
+| `--weekly-budget` | `MORNINGSTAR_WEEKLY_BUDGET` | 200 | USD/ISO-week |
+| `--run-budget` | -- | 25 | USD/run |
+| `--task-budget` | -- | 5 | USD/task |
+| `--gh-repo` | `MORNINGSTAR_GH_REPO` | -- | `owner/name` for PR target |
+| `--base-branch` | -- | `main` | PR base |
+
+### Register the watcher (optional)
+
+In a Claude Code session:
+
+```
+/schedule /morningstar:watch --cron "0 * * * *"
+```
+
+Note: Anthropic Cloud Tasks auto-expire after 7 days. Re-register weekly, or skip the watcher and rely on the 15-minute GH Actions cron.
+
+### See also
+
+For the full day-to-day ops runbook (pause, secret rotation, stuck-item recovery, failure modes), see [HANDOVER.md](../HANDOVER.md).

@@ -1,0 +1,85 @@
+name: morningstar-scheduled
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: "Process queue even if no caller signal (useful for smoke tests)"
+        required: false
+        default: "false"
+
+concurrency:
+  group: morningstar-queue
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  queue:
+    runs-on: ubuntu-latest
+    environment: ${{ vars.MORNINGSTAR_ENV || 'dev' }}
+    timeout-minutes: 55
+
+    steps:
+      - name: Checkout MorningStar
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install MorningStar
+        run: pip install -e .
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Checkout target repo
+        if: vars.MORNINGSTAR_TARGET_REPO != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.MORNINGSTAR_TARGET_REPO }}
+          ref: ${{ vars.MORNINGSTAR_TARGET_BRANCH || 'main' }}
+          token: ${{ secrets.MORNINGSTAR_TARGET_REPO_TOKEN }}
+          path: target-repo
+          fetch-depth: 0
+
+      - name: Configure git identity
+        working-directory: ${{ vars.MORNINGSTAR_TARGET_REPO != '' && 'target-repo' || '.' }}
+        run: |
+          git config user.name "morningstar-bot"
+          git config user.email "morningstar-bot@users.noreply.github.com"
+
+      - name: Process queue
+        working-directory: ${{ vars.MORNINGSTAR_TARGET_REPO != '' && 'target-repo' || '.' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MORNINGSTAR_NOTION_DB_ID: ${{ vars.MORNINGSTAR_NOTION_DB_ID }}
+          MORNINGSTAR_NOTION_TOKEN: ${{ secrets.MORNINGSTAR_NOTION_TOKEN }}
+          MORNINGSTAR_JIRA_URL: ${{ vars.MORNINGSTAR_JIRA_URL }}
+          MORNINGSTAR_JIRA_EMAIL: ${{ secrets.MORNINGSTAR_JIRA_EMAIL }}
+          MORNINGSTAR_JIRA_TOKEN: ${{ secrets.MORNINGSTAR_JIRA_TOKEN }}
+          MORNINGSTAR_JIRA_PROJECT_KEY: ${{ vars.MORNINGSTAR_JIRA_PROJECT_KEY }}
+          MORNINGSTAR_SLACK_WEBHOOK: ${{ secrets.MORNINGSTAR_SLACK_WEBHOOK }}
+          MORNINGSTAR_SLACK_BOT_TOKEN: ${{ secrets.MORNINGSTAR_SLACK_BOT_TOKEN }}
+          MORNINGSTAR_SLACK_CHANNEL_ID: ${{ secrets.MORNINGSTAR_SLACK_CHANNEL_ID }}
+          MORNINGSTAR_WEEKLY_BUDGET: ${{ vars.MORNINGSTAR_WEEKLY_BUDGET || '200' }}
+          MORNINGSTAR_GH_REPO: ${{ vars.MORNINGSTAR_TARGET_REPO }}
+          GH_TOKEN: ${{ secrets.MORNINGSTAR_TARGET_REPO_TOKEN || github.token }}
+        run: morningstar process-queue
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-logs-${{ github.run_id }}
+          path: |
+            ${{ vars.MORNINGSTAR_TARGET_REPO != '' && 'target-repo/.agent-logs' || '.agent-logs' }}
+            ${{ vars.MORNINGSTAR_TARGET_REPO != '' && 'target-repo/.morningstar' || '.morningstar' }}
+          if-no-files-found: ignore
+          retention-days: 14

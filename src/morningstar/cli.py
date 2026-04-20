@@ -13,10 +13,12 @@ from rich.table import Table
 from morningstar import __version__
 from morningstar.banner import print_banner
 from morningstar.engine import (
+    QueueConfig,
     RunState,
     execute_task,
     fetch_prd,
     generate_tasks,
+    process_queue,
     slack_post,
     validate_bot_token,
     validate_model,
@@ -317,6 +319,130 @@ def run(
 def version() -> None:
     """Show MorningStar version."""
     console.print(f"morningstar {__version__}")
+
+
+@app.command("process-queue")
+def process_queue_cmd(
+    repo: Path = typer.Option(
+        Path("."),
+        "--repo",
+        "-r",
+        help="Target repository (will be modified and pushed).",
+        exists=True,
+        dir_okay=True,
+        file_okay=False,
+        resolve_path=True,
+    ),
+    model: str = typer.Option("sonnet", "--model", "-m"),
+    per_run_budget: float = typer.Option(25.0, "--run-budget", min=0.01),
+    per_task_budget: float = typer.Option(5.0, "--task-budget", min=0.01),
+    weekly_budget: float = typer.Option(
+        200.0,
+        "--weekly-budget",
+        envvar="MORNINGSTAR_WEEKLY_BUDGET",
+        min=0.01,
+    ),
+    max_tasks: int = typer.Option(20, "--max-tasks", min=1, max=100),
+    notion_db_id: str = typer.Option(
+        "", "--notion-db-id", envvar="MORNINGSTAR_NOTION_DB_ID"
+    ),
+    notion_token: str = typer.Option(
+        "", "--notion-token", envvar="MORNINGSTAR_NOTION_TOKEN"
+    ),
+    jira_url: str = typer.Option("", "--jira-url", envvar="MORNINGSTAR_JIRA_URL"),
+    jira_email: str = typer.Option("", "--jira-email", envvar="MORNINGSTAR_JIRA_EMAIL"),
+    jira_token: str = typer.Option("", "--jira-token", envvar="MORNINGSTAR_JIRA_TOKEN"),
+    jira_project_key: str = typer.Option(
+        "", "--jira-project", envvar="MORNINGSTAR_JIRA_PROJECT_KEY"
+    ),
+    jira_label: str = typer.Option("morningstar", "--jira-label"),
+    gh_repo: str = typer.Option("", "--gh-repo", envvar="MORNINGSTAR_GH_REPO"),
+    base_branch: str = typer.Option("main", "--base-branch"),
+    slack_webhook: str = typer.Option(
+        "", "--slack-webhook", envvar="MORNINGSTAR_SLACK_WEBHOOK"
+    ),
+    slack_bot_token: str = typer.Option(
+        "", "--slack-bot-token", envvar="MORNINGSTAR_SLACK_BOT_TOKEN"
+    ),
+    slack_channel: str = typer.Option(
+        "", "--slack-channel", envvar="MORNINGSTAR_SLACK_CHANNEL_ID"
+    ),
+    question_timeout: int = typer.Option(300, "--question-timeout", min=30, max=1800),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """Scan Notion DB + Jira for pending work items and process them.
+
+    Designed for scheduled execution (cron / GitHub Actions). Each pending
+    item is branched, implemented, committed, pushed, PR'd, and its source
+    row flipped to Done/Failed.
+    """
+    print_banner(console)
+
+    try:
+        validate_model(model)
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise typer.Exit(1) from e
+
+    if slack_webhook:
+        try:
+            validate_slack_webhook(slack_webhook)
+        except ValueError as e:
+            console.print(f"[bold red]Error:[/bold red] {e}")
+            raise typer.Exit(1) from e
+    if slack_bot_token:
+        try:
+            validate_bot_token(slack_bot_token)
+        except ValueError as e:
+            console.print(f"[bold red]Error:[/bold red] {e}")
+            raise typer.Exit(1) from e
+
+    if not (notion_db_id or jira_url):
+        console.print(
+            "[bold red]Error:[/bold red] Must configure at least one source: "
+            "--notion-db-id or --jira-url (or env vars)."
+        )
+        raise typer.Exit(1)
+
+    cfg = QueueConfig(
+        repo_path=repo,
+        model=model,
+        per_run_budget=per_run_budget,
+        per_task_budget=per_task_budget,
+        weekly_budget=weekly_budget,
+        max_tasks=max_tasks,
+        notion_db_id=notion_db_id,
+        notion_token=notion_token,
+        jira_url=jira_url,
+        jira_email=jira_email,
+        jira_token=jira_token,
+        jira_project_key=jira_project_key,
+        jira_label=jira_label,
+        gh_repo=gh_repo,
+        base_branch=base_branch,
+        slack_webhook=slack_webhook,
+        slack_bot_token=slack_bot_token,
+        slack_channel=slack_channel,
+        question_timeout=question_timeout,
+        dry_run=dry_run,
+    )
+
+    result = process_queue(cfg)
+
+    summary = Table(title="Queue Run", border_style="bright_yellow", show_lines=True)
+    summary.add_column("Metric", style="dim")
+    summary.add_column("Value", style="bold")
+    summary.add_row("Items scanned", str(result.scanned))
+    summary.add_row("Processed", str(result.processed))
+    summary.add_row("Succeeded", f"[green]{result.succeeded}[/green]")
+    summary.add_row("Failed", f"[red]{result.failed}[/red]")
+    summary.add_row("Skipped (dry-run)", str(result.skipped))
+    summary.add_row("Run cost", f"[yellow]${result.total_cost:.2f}[/yellow]")
+    summary.add_row("PRs opened", "\n".join(result.prs_opened) or "-")
+    console.print(summary)
+
+    if result.failed > 0 and result.succeeded == 0:
+        raise typer.Exit(1)
 
 
 def main() -> None:

@@ -420,3 +420,81 @@ Currently Slack is one-way (agent posts updates). For the agent to read answers:
 2. After posting a question, poll `conversations.replies` every 30s
 3. Parse the human's reply and inject into the next Claude prompt
 4. Add timeout with default fallback (e.g., 5 min)
+
+---
+
+## 24/7 Queue Processing
+
+MorningStar also operates as a scheduled service with no human in the loop. The `process-queue` subcommand in `cli.py` and `process_queue()` in `engine.py` wrap the existing pipeline with source polling, status bookkeeping, branching, and PR opening.
+
+### Two-layer design
+
+```
+ Notion DB (rows)     Jira (tickets labeled 'morningstar')
+        |                        |
+        +-----------+------------+
+                    |
+                    v
+     Layer 1: WATCHER (Anthropic Cloud Task, hourly)
+       skills/watch/SKILL.md
+       - Scans both sources
+       - If non-empty: `gh workflow run morningstar-scheduled.yml`
+       - Posts Slack summary
+                    |
+                    | workflow_dispatch
+                    v
+     Layer 2: EXECUTOR (GitHub Actions, cron every 15 min)
+       .github/workflows/morningstar-scheduled.yml
+       Runs: morningstar process-queue
+         - fetch_pending_notion() + fetch_pending_jira()
+         - For each PendingItem:
+             set_notion_status / set_jira_status  -> "Running"
+             _prepare_branch("morningstar/<src>-<id>")
+             fetch_prd (or use inline_prd_text)
+             generate_tasks
+             for task in tasks: execute_task
+             open_github_pr
+             set_notion_status / set_jira_status  -> "Done" | "Failed"
+         - write_weekly_spend(budget_ledger)
+```
+
+Status fields on the source systems (Notion `Status` column, Jira ticket status) serve as the distributed state store — no separate database. Flipping `Pending → Running` acts as a soft lock: a concurrent runner sees `Running` and skips.
+
+### Layer responsibilities
+
+| Layer | Runs on | Cadence | Can do | Cannot do |
+|---|---|---|---|---|
+| Watcher | Anthropic Cloud Task | Hourly (7-day expiry) | Query sources, call `gh` CLI, post Slack | Clone repos, run pytest, commit code |
+| Executor | GitHub Actions ubuntu-latest | Every 15 min (cron) + on_dispatch | Clone target repo, run Claude Code CLI, open PRs | Nothing not in its env |
+
+Either layer can fail independently; the other keeps working. Both emit independent audit logs (Claude Cloud task log + GH Actions run log).
+
+### Failure-mode matrix
+
+| Scenario | Detection | Effect | Recovery |
+|---|---|---|---|
+| Watcher Cloud Task crashed | No hourly Slack post | GH Actions cron still fires every 15 min | Re-register watcher: `/schedule /morningstar:watch --cron "0 * * * *"` |
+| GH Actions cron misses a fire | Previous run artifact missing | Watcher dispatches on next hour | None needed -- self-healing |
+| Notion API 5xx | `fetch_pending_notion` returns `[]`, warning logged | Items stay `Pending`, retried next tick | None |
+| Jira API 401 | `fetch_pending_jira` returns `[]`, warning logged | Jira items stuck `To Do`, Notion items still processed | Rotate `MORNINGSTAR_JIRA_TOKEN` |
+| Item stuck on `Running` (runner crashed mid-flight) | Manual inspection | Item skipped on next tick (sees `Running`) | Manually flip back to `Pending` |
+| Weekly budget hit | `write_weekly_spend` + logged warning | Remaining items skip; summary Slack | Wait until next ISO week, or raise `MORNINGSTAR_WEEKLY_BUDGET` |
+| Per-run budget hit | In-loop break | Current run stops cleanly; unprocessed items stay `Pending` | Next cron tick continues |
+| `gh pr create` fails | Warning logged, `pr_url = None` | Item marked `Done/Failed`, but no PR link | Check `MORNINGSTAR_TARGET_REPO_TOKEN` scopes |
+| Source API both down | Both fetchers return `[]` | No items processed, Slack posted | Wait or page provider |
+| Git merge conflict with base | `_prepare_branch` succeeds but commits fail | Item marked `Failed` with note | Manually resolve, re-mark `Pending` |
+
+### What the executor adds on top of the single-PRD flow
+
+The `morningstar run` command handles one PRD interactively. `process-queue` adds:
+
+| Concern | Where implemented |
+|---|---|
+| Source polling | `fetch_pending_notion`, `fetch_pending_jira` |
+| Soft locking | `_mark_item(..., "Running")` before work begins |
+| Per-item isolation | `_prepare_branch("morningstar/<src>-<id>")` before each item |
+| Delivery | `open_github_pr` after successful run |
+| Terminal status | `_mark_item(..., "Done" | "Failed")` with PR URL + notes |
+| Weekly budget ledger | `read_weekly_spend` / `write_weekly_spend` JSON at `.morningstar/weekly-spend.json` |
+
+All the expensive LLM code paths (`fetch_prd`, `generate_tasks`, `execute_task`, `_run_claude`) are reused unchanged.

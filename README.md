@@ -111,6 +111,22 @@ If a task fails, MorningStar retries once using Claude Code's session resumption
 
 ---
 
+## 24/7 Operation
+
+MorningStar ships with a built-in queue processor (`morningstar process-queue`) and two GitHub Actions workflows that poll a Notion database and Jira project every 15 minutes, process any pending PRDs end-to-end, and open PRs automatically.
+
+**Quick setup:**
+
+1. Add a `Status` select column to your Notion DB with values `Pending | Running | Done | Failed`.
+2. In Jira, label tickets you want picked up with `morningstar`.
+3. Set repo-level GitHub **variables**: `MORNINGSTAR_ENV`, `MORNINGSTAR_NOTION_DB_ID`, `MORNINGSTAR_JIRA_URL`, `MORNINGSTAR_JIRA_PROJECT_KEY`, `MORNINGSTAR_WEEKLY_BUDGET`, `MORNINGSTAR_TARGET_REPO`.
+4. Set repo-level GitHub **secrets**: `ANTHROPIC_API_KEY`, `MORNINGSTAR_NOTION_TOKEN`, `MORNINGSTAR_JIRA_EMAIL`, `MORNINGSTAR_JIRA_TOKEN`, `MORNINGSTAR_SLACK_WEBHOOK`, `MORNINGSTAR_TARGET_REPO_TOKEN`.
+5. First scheduled run fires within 15 min. Watch the Actions tab.
+
+See [HANDOVER.md](HANDOVER.md) for the complete runbook and [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for the 24/7 setup walkthrough.
+
+---
+
 ## Security
 
 MorningStar executes code in your repository with full shell access. Before running:

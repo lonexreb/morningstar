@@ -1,0 +1,33 @@
+name: morningstar-scheduled-dryrun
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: morningstar-queue-dryrun
+  cancel-in-progress: true
+
+jobs:
+  dryrun:
+    runs-on: ubuntu-latest
+    environment: ${{ vars.MORNINGSTAR_ENV || 'dev' }}
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -e .
+
+      - name: Dry-run process-queue
+        env:
+          MORNINGSTAR_NOTION_DB_ID: ${{ vars.MORNINGSTAR_NOTION_DB_ID }}
+          MORNINGSTAR_NOTION_TOKEN: ${{ secrets.MORNINGSTAR_NOTION_TOKEN }}
+          MORNINGSTAR_JIRA_URL: ${{ vars.MORNINGSTAR_JIRA_URL }}
+          MORNINGSTAR_JIRA_EMAIL: ${{ secrets.MORNINGSTAR_JIRA_EMAIL }}
+          MORNINGSTAR_JIRA_TOKEN: ${{ secrets.MORNINGSTAR_JIRA_TOKEN }}
+          MORNINGSTAR_JIRA_PROJECT_KEY: ${{ vars.MORNINGSTAR_JIRA_PROJECT_KEY }}
+        run: morningstar process-queue --dry-run

@@ -14,11 +14,70 @@ MorningStar is a CLI tool that reads a product requirements document (PRD) from 
 
 You point it at a PRD and a repo. It codes until the PRD is fulfilled.
 
+MorningStar ships in two forms:
+
+- **Claude Code plugin** (recommended) -- use `/morningstar:run` inside any Claude Code session.
+- **Standalone CLI** -- `morningstar run ...` from your shell, installed via `pipx`.
+
+Both wrap the same engine. Pick whichever fits your workflow.
+
 ---
 
-## Prerequisites
+## Quick Start (Claude Code Plugin)
 
-Before using MorningStar, you need:
+The fastest path. Skip this section if you prefer the standalone CLI.
+
+### 1. Install the plugin
+
+Inside Claude Code:
+
+```
+/plugin install morningstar@https://github.com/lonexreb/morningstar
+```
+
+### 2. Connect Notion MCP
+
+Claude Code must have a Notion MCP connection so the plugin can read your PRD:
+
+```bash
+claude mcp list
+```
+
+If Notion is missing, follow [Claude Code MCP docs](https://code.claude.com/docs/en/mcp).
+
+### 3. (Optional) Configure Slack
+
+Set these environment variables before launching Claude Code if you want progress updates and two-way Q&A:
+
+```bash
+export MORNINGSTAR_SLACK_WEBHOOK="https://hooks.slack.com/services/..."
+export MORNINGSTAR_SLACK_BOT_TOKEN="xoxb-..."        # two-way Q&A only
+export MORNINGSTAR_SLACK_CHANNEL_ID="C01234567"      # two-way Q&A only
+```
+
+### 4. Run
+
+| Command | What it does |
+|---------|--------------|
+| `/morningstar:run <notion-url>` | Full autonomous run (fetch PRD -> plan -> execute with commits) |
+| `/morningstar:dry-run <notion-url>` | Preview the task plan only, no code changes |
+| `/morningstar:version` | Show plugin version |
+
+Example:
+
+```
+/morningstar:run https://notion.so/My-PRD-abc123 --model sonnet --budget 50
+```
+
+The plugin delegates to the `morningstar-runner` agent, which follows the same 4-phase workflow as the CLI (fetch -> plan -> execute -> summarize).
+
+---
+
+## Prerequisites (Standalone CLI)
+
+Skip this section if you're using the plugin path above.
+
+Before using MorningStar from the shell, you need:
 
 ### 1. Python 3.10+
 

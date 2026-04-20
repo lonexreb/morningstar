@@ -4,6 +4,35 @@
 
 MorningStar is an autonomous coding agent that translates Notion PRDs into implemented code. It orchestrates Claude Code CLI in headless mode, breaking requirements into tasks and executing them sequentially with automatic testing, git commits, and Slack progress updates.
 
+## Distribution
+
+MorningStar ships in two forms that wrap the same engine:
+
+```
++----------------------------------+    +----------------------------------+
+|  Claude Code Plugin              |    |  Standalone CLI                  |
+|  .claude-plugin/plugin.json      |    |  pyproject.toml  ->  pipx        |
+|  skills/run/SKILL.md             |    |  morningstar run ...             |
+|  skills/dry-run/SKILL.md         |    |                                  |
+|  skills/version/SKILL.md         |    |                                  |
+|  agents/morningstar-runner.md    |    |                                  |
++----------------|-----------------+    +----------------|-----------------+
+                 |                                       |
+                 +------------------+--------------------+
+                                    |
+                                    v
+                       +-------------------------+
+                       |  src/morningstar/       |
+                       |   cli.py  ->  engine.py |
+                       +-------------------------+
+```
+
+The plugin surface (`.claude-plugin/`, `skills/`, `agents/`) exposes `/morningstar:run`, `/morningstar:dry-run`, `/morningstar:version` inside Claude Code. The `morningstar-runner` agent is the autonomous orchestrator invoked by the run skill. Both surfaces call the same Python engine below.
+
+---
+
+## Engine Overview
+
 ```
 User
   |

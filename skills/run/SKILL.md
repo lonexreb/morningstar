@@ -1,5 +1,5 @@
 ---
-description: Run the MorningStar autonomous agent to implement features from a Notion PRD. Use when the user wants to build features from requirements, implement a PRD, or run the autonomous coding workflow.
+description: Implements a product requirements document (PRD) end-to-end. Reads the PRD from a Notion page, analyzes the current codebase, generates a task plan, and then implements each task with tests and git commits. Use when the user provides a Notion URL or says any of "implement this PRD", "build from requirements", "run morningstar", "ship this spec", "automate this feature", "turn this PRD into code", or "autonomous coding". Pushes progress to Slack at every task boundary when a webhook is provided.
 argument-hint: <notion-url> [--model sonnet|opus|haiku] [--budget 50] [--slack-webhook https://hooks.slack.com/...]
 ---
 

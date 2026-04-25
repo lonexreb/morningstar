@@ -1,5 +1,5 @@
 ---
-description: Preview what MorningStar would build without making any changes. Fetches the PRD, analyzes the codebase, and shows the task plan. No code is written or committed.
+description: Previews the MorningStar task plan for a PRD without writing any code or making commits. Fetches the Notion PRD, analyzes the current codebase, and prints the proposed task list with files, acceptance criteria, and an estimated cost. Use when the user says any of "preview", "dry run", "what would this build", "show me the plan", "estimate cost", "morningstar dry-run", or wants to validate a PRD before triggering a real run. Read-only and free to invoke.
 argument-hint: <notion-url>
 ---
 

@@ -1,5 +1,5 @@
 ---
-description: Watch Notion and Jira for new MorningStar PRDs and dispatch the GitHub Actions executor. Use when the user wants to trigger a 24/7 poll now or inspect queued work. Safe to run often -- does not execute code, only dispatches.
+description: Polls Notion and Jira for pending MorningStar PRDs and dispatches the GitHub Actions executor when work is found. Use when the user says any of "watch the queue", "poll for prds", "check queue", "trigger morningstar now", "is anything queued", "force a queue scan", or "morningstar 24/7 status". Safe to run on a schedule -- read-only against Notion/Jira, only writes a workflow_dispatch event and a Slack summary.
 argument-hint: [--repo owner/name]
 ---
 

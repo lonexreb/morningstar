@@ -1,0 +1,31 @@
+{
+  "name": "morningstar",
+  "owner": {
+    "name": "Shubhankar Tripathy",
+    "url": "https://github.com/lonexreb"
+  },
+  "description": "MorningStar — autonomous coding agent for Claude Code. Turns Notion and Jira PRDs into shipped pull requests with a 24/7 queue processor and two-way Slack Q&A.",
+  "plugins": [
+    {
+      "name": "morningstar",
+      "description": "Autonomous coding agent that turns Notion and Jira PRDs into shipped pull requests. Reads requirements, analyzes the codebase, generates a task plan, implements each task with tests, commits, and opens a PR. Includes a 24/7 GitHub Actions queue processor and two-way Slack Q&A.",
+      "category": "development",
+      "source": ".",
+      "homepage": "https://github.com/lonexreb/morningstar",
+      "version": "0.1.0",
+      "author": {
+        "name": "Shubhankar Tripathy",
+        "url": "https://github.com/lonexreb"
+      },
+      "tags": [
+        "autonomous-agent",
+        "prd-to-code",
+        "notion",
+        "jira",
+        "slack",
+        "github-actions",
+        "background-agent"
+      ]
+    }
+  ]
+}

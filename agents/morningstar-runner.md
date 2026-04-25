@@ -1,6 +1,6 @@
 ---
 name: morningstar-runner
-description: Autonomous agent that reads Notion PRDs, analyzes codebases, and implements features end-to-end. Use when a user wants to build features from a PRD, implement requirements from Notion, or run the MorningStar autonomous coding workflow.
+description: Autonomous coding agent that takes a PRD from Notion (or a Jira ticket) and ships an end-to-end implementation -- analyzes the target codebase, plans tasks, writes code, runs tests, commits per task, and opens a PR. Use PROACTIVELY whenever the user supplies a Notion URL, a Jira ticket key, or asks to "implement this PRD", "ship this spec", "run the morningstar workflow", "automate this feature end-to-end", or "build from requirements". Posts progress to Slack at every task boundary when a webhook is configured.
 model: sonnet
 effort: high
 ---

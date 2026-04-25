@@ -29,11 +29,20 @@ The fastest path. Skip this section if you prefer the standalone CLI.
 
 ### 1. Install the plugin
 
-Inside Claude Code:
+Inside Claude Code, register MorningStar's marketplace and install:
+
+```
+/plugin marketplace add lonexreb/morningstar
+/plugin install morningstar@morningstar
+```
+
+Or, in one shot, install directly from the GitHub source:
 
 ```
 /plugin install morningstar@https://github.com/lonexreb/morningstar
 ```
+
+Both paths resolve to the same plugin manifest (`.claude-plugin/plugin.json`). The marketplace path is preferred -- it lets you receive updates with `/plugin marketplace update morningstar`.
 
 ### 2. Connect Notion MCP
 

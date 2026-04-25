@@ -12,9 +12,11 @@ MorningStar ships in two forms that wrap the same engine:
 +----------------------------------+    +----------------------------------+
 |  Claude Code Plugin              |    |  Standalone CLI                  |
 |  .claude-plugin/plugin.json      |    |  pyproject.toml  ->  pipx        |
-|  skills/run/SKILL.md             |    |  morningstar run ...             |
+|  .claude-plugin/marketplace.json |    |  morningstar run ...             |
+|  skills/run/SKILL.md             |    |  morningstar process-queue ...  |
 |  skills/dry-run/SKILL.md         |    |                                  |
 |  skills/version/SKILL.md         |    |                                  |
+|  skills/watch/SKILL.md           |    |                                  |
 |  agents/morningstar-runner.md    |    |                                  |
 +----------------|-----------------+    +----------------|-----------------+
                  |                                       |
@@ -27,7 +29,9 @@ MorningStar ships in two forms that wrap the same engine:
                        +-------------------------+
 ```
 
-The plugin surface (`.claude-plugin/`, `skills/`, `agents/`) exposes `/morningstar:run`, `/morningstar:dry-run`, `/morningstar:version` inside Claude Code. The `morningstar-runner` agent is the autonomous orchestrator invoked by the run skill. Both surfaces call the same Python engine below.
+The plugin surface (`.claude-plugin/`, `skills/`, `agents/`) exposes `/morningstar:run`, `/morningstar:dry-run`, `/morningstar:version`, and `/morningstar:watch` inside Claude Code. The `morningstar-runner` agent is the autonomous orchestrator invoked by the run skill. Both surfaces call the same Python engine below.
+
+`marketplace.json` lets users register MorningStar with `/plugin marketplace add lonexreb/morningstar` and receive updates via `/plugin marketplace update morningstar`. It mirrors the official Anthropic plugin marketplace format -- one repo, one plugin entry, `category: development`. `plugin.json` is the source of truth for the manifest (name, version, description, author, homepage, repository, license, keywords, skill/agent paths); marketplace.json fields supplement it for discovery.
 
 ---
 

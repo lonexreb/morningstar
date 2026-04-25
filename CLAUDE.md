@@ -35,7 +35,9 @@ src/morningstar/
 
 morningstar_demo.py  -- standalone walkthrough of process-queue with all I/O mocked
 .github/workflows/   -- 15-min cron executor + manual dry-run executor
-.claude-plugin/      -- plugin manifest
+.claude-plugin/
+  plugin.json        -- plugin manifest (name, version, keywords, paths)
+  marketplace.json   -- self-hosted marketplace entry (category, tags, source)
 agents/morningstar-runner.md  -- autonomous orchestrator agent
 skills/run|dry-run|version|watch  -- user-facing slash commands
 ```
@@ -72,3 +74,17 @@ Before any commit:
 - `pytest` must be green
 
 `pyproject.toml` ignores B008 globally (typer.Option-in-defaults is idiomatic) and B017 in tests (frozen-dataclass mutation assertion).
+
+## Discoverability (keep in sync)
+
+When something user-facing changes, update *all* of these so MorningStar stays findable:
+
+- `.claude-plugin/plugin.json` -- description + keywords (Claude Code marketplace + skill router)
+- `.claude-plugin/marketplace.json` -- description + tags + category (self-hosted marketplace)
+- `skills/*/SKILL.md` frontmatter `description` -- third-person, pushy, with explicit trigger phrases (Anthropic skill discovery best practice)
+- `agents/morningstar-runner.md` frontmatter `description` -- with `PROACTIVELY` marker
+- `README.md` -- badges, opening paragraph, Use Cases, FAQ (long-tail SEO)
+- GitHub repo topics + description (set via `gh api -X PUT /repos/lonexreb/morningstar/topics ...`)
+- `pyproject.toml` `keywords` (PyPI discovery)
+
+The last source of truth is the GitHub topics list -- if the README mentions a capability that isn't a topic, add the topic.

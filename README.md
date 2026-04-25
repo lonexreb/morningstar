@@ -19,25 +19,44 @@
 |_|  |_|\___/|_|_\_|\_|___|_|\_|\___|___/ |_/_/ \_\_|_\
 ```
 
-**Autonomous coding agent that turns Notion PRDs into working code.**
+[![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-Plugin-orange?logo=anthropic)](https://github.com/lonexreb/morningstar)
+[![PyPI](https://img.shields.io/pypi/v/morningstar-agent.svg?label=pypi)](https://pypi.org/project/morningstar-agent/)
+[![Python](https://img.shields.io/pypi/pyversions/morningstar-agent.svg)](https://pypi.org/project/morningstar-agent/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-117%20passing-brightgreen)](tests/)
 
-Give it a PRD, a repo, and a Slack webhook. It reads the requirements, analyzes the codebase, figures out what's missing, and builds it -- task by task, with tests, commits, and progress updates.
+**MorningStar is an autonomous coding agent for [Claude Code](https://claude.ai/code) that turns Notion and Jira PRDs into shipped pull requests.**
+
+Give it a Notion page (or a Jira ticket) and a target repo. It reads the requirements, analyzes your codebase, generates an ordered task plan, and implements each task with tests, git commits, and per-step Slack updates -- ending with a PR you can review. A built-in 24/7 queue processor runs the same loop on a 15-minute GitHub Actions cron, asking questions in Slack when it gets stuck.
+
+> **Keywords:** Claude Code plugin, autonomous coding agent, PRD-to-code, Notion to GitHub, Jira to PR, background coding agent, AI software engineer, anthropic claude code agent, autonomous SWE, async coding agent.
 
 ---
 
 ## Install
 
-### As Claude Code Plugin (recommended)
+### As a Claude Code Plugin (recommended)
 
-```bash
+Inside any Claude Code session:
+
+```
+/plugin marketplace add lonexreb/morningstar
+/plugin install morningstar@morningstar
+```
+
+Or, install directly from GitHub without registering the marketplace:
+
+```
 /plugin install morningstar@https://github.com/lonexreb/morningstar
 ```
 
-Then use inside any Claude Code session:
+Then drive it from the prompt:
 
 ```
 /morningstar:run https://notion.so/Your-PRD-abc123
 /morningstar:dry-run https://notion.so/Your-PRD-abc123
+/morningstar:watch          # poll the 24/7 queue on demand
+/morningstar:version
 ```
 
 ### As Standalone CLI
@@ -210,6 +229,60 @@ pytest
 | `MORNINGSTAR_SLACK_CHANNEL` | No | Channel ID for posting questions |
 
 The Claude Code CLI must be authenticated (`claude auth login`).
+
+---
+
+## Use Cases
+
+MorningStar is built for teams who already write specs in Notion or Jira and want to compress the time between "spec approved" and "PR opened" without giving up review.
+
+- **Async PRD execution** — drop a Notion page link in Slack, walk away, come back to a PR.
+- **Backlog drainer** — label sufficiently scoped Jira tickets with `morningstar`; the 24/7 cron picks them up and ships PRs while you sleep.
+- **CEO / PM-driven prototyping** — non-engineers file PRDs in Notion; engineers review the resulting PR instead of building from scratch.
+- **Internal tools and glue work** — small services, integrations, scripts, dashboards, migrations.
+- **Bug-fix sprints** — file a one-paragraph repro PRD per bug; let the agent run them in batch overnight.
+- **Documentation refreshes** — point it at a doc site and a "rewrite for X" PRD.
+- **Refactor checkpoints** — small, self-contained refactors framed as a PRD with acceptance criteria.
+
+Not a fit for: research-heavy spikes, cross-repo refactors, or PRDs that require human judgement on every change. MorningStar opens a PR -- it does not merge.
+
+---
+
+## FAQ
+
+**Q: How is MorningStar different from a Claude Code skill or a one-shot agent?**
+MorningStar is a *workflow*, not a single prompt. It owns the full loop: PRD ingestion → codebase analysis → task planning → per-task implementation with tests → git commit → Slack progress → PR. The 24/7 queue processor runs the same loop unattended on a cron.
+
+**Q: Does it run on Claude Code, the API, or both?**
+Both. The plugin form runs inside Claude Code (recommended for interactive use). The standalone CLI shells out to `claude -p` in headless mode and works in CI / GitHub Actions.
+
+**Q: How does it avoid runaway spend?**
+Three layers of budget: per-task budget, per-run budget, and a weekly ledger persisted to the repo (for the 24/7 mode). The agent stops as soon as any limit is hit and posts a Slack notice.
+
+**Q: What about secrets in PRDs or generated code?**
+`git add` is run with explicit excludes for `.env`, `*.pem`, `*.key`, `credentials.json`, and `*secret*` patterns. PRD fetch and task generation run in read-only tool modes (no Bash). Only execution gets write + Bash. See [SECURITY.md](SECURITY.md).
+
+**Q: Can the agent ask me questions when it's stuck?**
+Yes. Provide a Slack bot token and channel ID; the agent posts blocking questions there and waits up to `--question-timeout` seconds for a reply. If no reply, it proceeds with the documented default. See [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
+
+**Q: Does it work with Jira, or only Notion?**
+Both. The 24/7 queue scans a Notion database (`Status == Pending`) *and* a Jira project (`label == morningstar AND status == "To Do"`). PRs are opened against the configured target repo regardless of source.
+
+**Q: What's the minimum repo I can point it at?**
+Any git repo with a `CLAUDE.md` or `README.md` and tests it can run. Smaller, well-scoped codebases produce dramatically better task plans than monorepos.
+
+**Q: How do I uninstall the plugin?**
+Inside Claude Code: `/plugin uninstall morningstar` then optionally `/plugin marketplace remove morningstar`.
+
+---
+
+## Related
+
+- [Claude Code documentation](https://code.claude.com/docs/) — Anthropic's official plugin / skills / agents reference.
+- [anthropics/claude-plugins-official](https://github.com/anthropics/claude-plugins-official) — official plugin marketplace.
+- [HANDOVER.md](HANDOVER.md) — operations runbook for the 24/7 system.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — engine internals.
+- [docs/USER_GUIDE.md](docs/USER_GUIDE.md) — end-to-end setup walkthrough.
 
 ---
 

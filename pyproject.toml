@@ -12,7 +12,25 @@ license = "MIT"
 authors = [
     { name = "Shubhankar Tripathy" },
 ]
-keywords = ["ai", "agent", "claude", "coding", "automation", "notion"]
+keywords = [
+    "ai",
+    "ai-agent",
+    "agent",
+    "anthropic",
+    "anthropic-claude",
+    "claude",
+    "claude-code",
+    "claude-code-plugin",
+    "autonomous-agent",
+    "coding-agent",
+    "background-agent",
+    "prd-to-code",
+    "notion",
+    "jira",
+    "slack-bot",
+    "github-actions",
+    "automation",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",

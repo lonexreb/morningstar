@@ -64,7 +64,7 @@ skills/run|dry-run|version|watch  -- user-facing slash commands
 ```bash
 ruff check src/ tests/        # lint (clean)
 mypy src/morningstar/         # type check (clean)
-pytest                        # 134 tests, all passing
+pytest                        # 142 tests, all passing
 python morningstar_demo.py    # zero-credentials pipeline walkthrough
 ```
 

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import datetime as _dt
+import json as _json
+import re as _re
 from pathlib import Path
 
 import typer
@@ -462,6 +465,49 @@ def process_queue_cmd(
         raise typer.Exit(1)
 
 
+_DURATION_RE = _re.compile(r"^\s*(\d+)\s*([smhd])\s*$", _re.IGNORECASE)
+
+
+def _parse_duration(text: str) -> _dt.timedelta:
+    """Parse '30s' / '10m' / '24h' / '7d' into a timedelta.
+
+    Case-insensitive. Raises ValueError on malformed input.
+    """
+    match = _DURATION_RE.match(text)
+    if not match:
+        raise ValueError(
+            f"Invalid duration {text!r}. Expected '<int><unit>' where unit is "
+            "s, m, h, or d (e.g. '24h', '7d')."
+        )
+    n = int(match.group(1))
+    unit = match.group(2).lower()
+    if unit == "s":
+        return _dt.timedelta(seconds=n)
+    if unit == "m":
+        return _dt.timedelta(minutes=n)
+    if unit == "h":
+        return _dt.timedelta(hours=n)
+    return _dt.timedelta(days=n)
+
+
+def _filter_since(records: list, since: str | None) -> list:
+    """Keep records whose ISO timestamp >= now - duration. Bad timestamps are kept."""
+    if not since:
+        return records
+    delta = _parse_duration(since)
+    cutoff = _dt.datetime.now(_dt.timezone.utc) - delta
+    kept = []
+    for rec in records:
+        try:
+            ts = _dt.datetime.fromisoformat(rec.timestamp)
+        except (ValueError, TypeError):
+            kept.append(rec)
+            continue
+        if ts >= cutoff:
+            kept.append(rec)
+    return kept
+
+
 @app.command()
 def status(
     repo: Path = typer.Option(
@@ -489,17 +535,86 @@ def status(
         min=0.01,
         help="Weekly budget for the spend bar (only used when no run history exists).",
     ),
+    since: str = typer.Option(
+        "",
+        "--since",
+        help="Only include runs newer than this duration (e.g. '24h', '7d').",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit a machine-readable JSON snapshot instead of a Rich dashboard.",
+    ),
 ) -> None:
     """Show queue health: weekly spend, recent runs, last PRs opened."""
-    print_banner(console)
-
     week_key, spend_so_far = read_weekly_spend(repo)
-    history = read_run_history(repo, limit=limit)
+
+    # `--since` filters first, `--limit` then trims the most recent N. Reading
+    # all records is fine -- the file is capped at 500.
+    all_history = read_run_history(repo)
+    if since:
+        try:
+            all_history = _filter_since(all_history, since)
+        except ValueError as e:
+            console.print(f"[bold red]Error:[/bold red] {e}")
+            raise typer.Exit(1) from e
+    history = all_history[-limit:] if limit else all_history
 
     # Prefer the budget from the most recent run record so the bar reflects
     # what actually constrained the system, not the CLI default.
     budget = history[-1].weekly_budget if history else weekly_budget
     pct = min(100.0, (spend_so_far / budget) * 100.0) if budget > 0 else 0.0
+
+    total_processed = sum(r.processed for r in history)
+    total_succeeded = sum(r.succeeded for r in history)
+    total_failed = sum(r.failed for r in history)
+    total_cost = sum(r.total_cost for r in history)
+    success_rate = (
+        (total_succeeded / total_processed) * 100.0 if total_processed else 0.0
+    )
+    recent_prs = [pr for rec in reversed(history) for pr in rec.prs_opened][:10]
+
+    if json_output:
+        payload = {
+            "week_key": week_key,
+            "weekly_spend": round(spend_so_far, 4),
+            "weekly_budget": round(budget, 4),
+            "weekly_pct": round(pct, 2),
+            "since": since or None,
+            "limit": limit,
+            "window": {
+                "runs": len(history),
+                "items_processed": total_processed,
+                "items_succeeded": total_succeeded,
+                "items_failed": total_failed,
+                "success_rate_pct": round(success_rate, 2),
+                "total_cost": round(total_cost, 4),
+            },
+            "recent_prs": recent_prs,
+            "runs": [
+                {
+                    "timestamp": r.timestamp,
+                    "week_key": r.week_key,
+                    "scanned": r.scanned,
+                    "processed": r.processed,
+                    "succeeded": r.succeeded,
+                    "failed": r.failed,
+                    "skipped": r.skipped,
+                    "total_cost": round(r.total_cost, 4),
+                    "weekly_spend_after": round(r.weekly_spend_after, 4),
+                    "weekly_budget": round(r.weekly_budget, 4),
+                    "prs_opened": list(r.prs_opened),
+                    "dry_run": r.dry_run,
+                }
+                for r in history
+            ],
+        }
+        # print() (not console.print) keeps stdout pristine for piping into jq.
+        print(_json.dumps(payload, indent=2))
+        return
+
+    print_banner(console)
+
     bar_width = 30
     filled = int(round(bar_width * pct / 100.0))
     bar = "█" * filled + "░" * (bar_width - filled)
@@ -508,17 +623,24 @@ def status(
     spend_panel = Panel.fit(
         f"[bold]Week[/bold] {week_key}\n"
         f"[{bar_color}]{bar}[/{bar_color}] {pct:5.1f}%\n"
-        f"[bold]${spend_so_far:.2f}[/bold] / ${budget:.2f}",
+        f"[bold]${spend_so_far:.2f}[/bold] / ${budget:.2f}"
+        + (f"\n[dim]Window: --since {since}[/dim]" if since else ""),
         title="Weekly spend",
         border_style="bright_yellow",
     )
     console.print(spend_panel)
 
     if not history:
-        console.print(
-            "[dim]No run history yet. "
-            "Run [bold]morningstar process-queue[/bold] to start.[/dim]"
-        )
+        if since:
+            console.print(
+                f"[dim]No runs in the last {since}. Try a wider window or "
+                f"check `morningstar process-queue` is firing.[/dim]"
+            )
+        else:
+            console.print(
+                "[dim]No run history yet. "
+                "Run [bold]morningstar process-queue[/bold] to start.[/dim]"
+            )
         return
 
     runs_table = Table(
@@ -546,15 +668,6 @@ def status(
         )
     console.print(runs_table)
 
-    # Aggregate health stats over the displayed window.
-    total_processed = sum(r.processed for r in history)
-    total_succeeded = sum(r.succeeded for r in history)
-    total_failed = sum(r.failed for r in history)
-    total_cost = sum(r.total_cost for r in history)
-    success_rate = (
-        (total_succeeded / total_processed) * 100.0 if total_processed else 0.0
-    )
-
     health_color = (
         "green" if success_rate >= 80 or total_processed == 0
         else "yellow" if success_rate >= 50
@@ -572,7 +685,6 @@ def status(
     summary.add_row("Total cost (window)", f"${total_cost:.2f}")
     console.print(summary)
 
-    recent_prs = [pr for rec in reversed(history) for pr in rec.prs_opened][:10]
     if recent_prs:
         prs_table = Table(
             title="Recent PRs (most recent first)",

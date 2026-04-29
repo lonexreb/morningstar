@@ -23,7 +23,7 @@
 [![PyPI](https://img.shields.io/pypi/v/morningstar-agent.svg?label=pypi)](https://pypi.org/project/morningstar-agent/)
 [![Python](https://img.shields.io/pypi/pyversions/morningstar-agent.svg)](https://pypi.org/project/morningstar-agent/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-134%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-142%20passing-brightgreen)](tests/)
 
 **MorningStar is an autonomous coding agent for [Claude Code](https://claude.ai/code) that turns Notion and Jira PRDs into shipped pull requests.**
 
@@ -145,10 +145,12 @@ MorningStar ships with a built-in queue processor (`morningstar process-queue`) 
 **Check on it any time:**
 
 ```bash
-morningstar status --repo /path/to/your/project
+morningstar status --repo /path/to/your/project              # Rich dashboard
+morningstar status --repo /path/to/your/project --since 24h  # filter window
+morningstar status --repo /path/to/your/project --json | jq  # cron-friendly
 ```
 
-`status` reads `.morningstar/run-history.jsonl` (auto-written by every queue run) and prints the current weekly spend, the last 10 runs as a table (cost / success / failures / mode), an aggregate success rate, and the most recent PRs opened. No external dependencies — works offline against the local repo.
+`status` reads `.morningstar/run-history.jsonl` (auto-written by every queue run) and prints the current weekly spend, the last 10 runs as a table (cost / success / failures / mode), an aggregate success rate, and the most recent PRs opened. `--json` emits a machine-readable snapshot you can pipe into `jq`, alerts, or dashboards. No external dependencies — works offline against the local repo.
 
 See [HANDOVER.md](HANDOVER.md) for the complete runbook and [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for the 24/7 setup walkthrough.
 

@@ -320,22 +320,51 @@ Show queue health for a repo MorningStar processes — weekly spend bar, recent 
 ```bash
 morningstar status --repo /path/to/repo
 morningstar status --repo /path/to/repo --limit 25
+morningstar status --repo /path/to/repo --since 24h           # only the last day
+morningstar status --repo /path/to/repo --json | jq           # script-friendly
 ```
 
 | Option | Default | Notes |
 |--------|---------|-------|
 | `--repo`, `-r` | `.` | Target repo (the one `process-queue` runs against). |
 | `--limit`, `-n` | `10` | How many recent runs to show. Range: 1–100. |
+| `--since` | _none_ | Filter to runs newer than this duration. Accepts `<int><unit>` where unit is `s`, `m`, `h`, or `d` (case-insensitive). Examples: `30m`, `24h`, `7d`. |
+| `--json` | _off_ | Emit a machine-readable JSON snapshot to stdout instead of the Rich dashboard. Banner is suppressed so output is pipe-safe (`jq`, etc.). |
 | `--weekly-budget` | `200.0` | Only used as a fallback when no run history exists yet. Once history is present, the budget from the most recent run is shown. |
 
-**What you see:**
+**What you see (default Rich mode):**
 
 - **Weekly spend** — color-coded bar (green < 60% / yellow < 90% / red ≥ 90%) showing `spend / budget` for the current ISO week.
 - **Recent runs** — table with timestamp, items scanned, succeeded, failed, skipped (dry-run), cost, and live/dry mode.
 - **Aggregate health** — total processed, success rate (color-coded ≥ 80% green / ≥ 50% yellow / else red), failed count, total spend across the displayed window.
 - **Recent PRs** — most recent 10 PR URLs across the displayed runs.
 
-**Empty history**: if no runs have been recorded yet, the command prints a hint to run `morningstar process-queue` first instead of erroring.
+**JSON shape (`--json`):**
+
+```jsonc
+{
+  "week_key": "2026-W18",
+  "weekly_spend": 12.50,
+  "weekly_budget": 200.00,
+  "weekly_pct": 6.25,
+  "since": "24h",                  // null if --since was not used
+  "limit": 10,
+  "window": {
+    "runs": 3,
+    "items_processed": 5,
+    "items_succeeded": 4,
+    "items_failed": 1,
+    "success_rate_pct": 80.00,
+    "total_cost": 7.25
+  },
+  "recent_prs": ["https://github.com/.../pull/123"],
+  "runs": [ /* RunRecord per run, oldest-first */ ]
+}
+```
+
+Useful for cron-driven monitoring (post a Slack alert when `success_rate_pct < 50`, when `weekly_pct > 90`, etc.).
+
+**Empty history**: if no runs have been recorded yet, the command prints a hint to run `morningstar process-queue` first instead of erroring. With `--since`, an empty window prints a "no runs in the last X" message.
 
 ---
 

@@ -242,3 +242,117 @@ class TestStatusCommand:
         result = runner.invoke(app, ["status", "--repo", str(tmp_repo)])
         assert result.exit_code == 0
         assert "0.0%" in result.stdout  # success rate
+
+
+# ── --json output ─────────────────────────────────────────────
+
+
+class TestStatusJson:
+    def test_json_empty_history(self, tmp_repo: Path) -> None:
+        import json as _json
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["status", "--repo", str(tmp_repo), "--json"]
+        )
+        assert result.exit_code == 0
+        payload = _json.loads(result.stdout)
+        assert payload["runs"] == []
+        assert payload["window"]["runs"] == 0
+        assert payload["weekly_spend"] == 0.0
+        assert payload["recent_prs"] == []
+
+    def test_json_includes_aggregate_metrics(self, tmp_repo: Path) -> None:
+        import json as _json
+        append_run_history(
+            tmp_repo,
+            _record(scanned=2, processed=2, succeeded=1, failed=1, total_cost=3.0),
+        )
+        append_run_history(
+            tmp_repo,
+            _record(scanned=1, processed=1, succeeded=1, failed=0, total_cost=2.0),
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["status", "--repo", str(tmp_repo), "--json"]
+        )
+        assert result.exit_code == 0
+        payload = _json.loads(result.stdout)
+        assert payload["window"]["runs"] == 2
+        assert payload["window"]["items_processed"] == 3
+        assert payload["window"]["items_succeeded"] == 2
+        assert payload["window"]["items_failed"] == 1
+        assert payload["window"]["total_cost"] == 5.0
+        assert payload["window"]["success_rate_pct"] == pytest.approx(66.67, rel=1e-2)
+        assert len(payload["runs"]) == 2
+
+    def test_json_no_banner_emitted(self, tmp_repo: Path) -> None:
+        """--json must keep stdout pristine (jq-pipeable)."""
+        import json as _json
+        append_run_history(tmp_repo, _record())
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["status", "--repo", str(tmp_repo), "--json"]
+        )
+        assert result.exit_code == 0
+        # Whole stdout should parse as JSON -- no leading banner allowed.
+        _json.loads(result.stdout)
+
+
+# ── --since filter ───────────────────────────────────────────
+
+
+class TestStatusSince:
+    def test_parse_duration_units(self) -> None:
+        from datetime import timedelta
+
+        from morningstar.cli import _parse_duration
+        assert _parse_duration("30s") == timedelta(seconds=30)
+        assert _parse_duration("10m") == timedelta(minutes=10)
+        assert _parse_duration("24h") == timedelta(hours=24)
+        assert _parse_duration("7d") == timedelta(days=7)
+        assert _parse_duration("24H") == timedelta(hours=24)  # case-insensitive
+
+    def test_parse_duration_rejects_garbage(self) -> None:
+        from morningstar.cli import _parse_duration
+        for bad in ["", "abc", "1y", "-3h", "3hr", "1.5h"]:
+            with pytest.raises(ValueError):
+                _parse_duration(bad)
+
+    def test_since_filters_old_records(self, tmp_repo: Path) -> None:
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
+        old = (now - _dt.timedelta(days=30)).isoformat(timespec="seconds")
+        recent = (now - _dt.timedelta(hours=1)).isoformat(timespec="seconds")
+        append_run_history(tmp_repo, _record(timestamp=old, scanned=99))
+        append_run_history(tmp_repo, _record(timestamp=recent, scanned=11))
+
+        import json as _json
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["status", "--repo", str(tmp_repo), "--since", "24h", "--json"],
+        )
+        assert result.exit_code == 0
+        payload = _json.loads(result.stdout)
+        assert len(payload["runs"]) == 1
+        assert payload["runs"][0]["scanned"] == 11
+
+    def test_since_invalid_duration_exits_nonzero(self, tmp_repo: Path) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["status", "--repo", str(tmp_repo), "--since", "bogus"]
+        )
+        assert result.exit_code != 0
+
+    def test_since_empty_window_message(self, tmp_repo: Path) -> None:
+        import datetime as _dt
+        old = (
+            _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=30)
+        ).isoformat(timespec="seconds")
+        append_run_history(tmp_repo, _record(timestamp=old))
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["status", "--repo", str(tmp_repo), "--since", "1h"]
+        )
+        assert result.exit_code == 0
+        assert "No runs in the last 1h" in result.stdout

@@ -101,6 +101,32 @@ python morningstar_demo.py
 
 Use this on a local checkout to confirm the engine builds, plans, and commits correctly after a deploy.
 
+### Check queue health at any time
+
+```bash
+morningstar status --repo /path/to/target-repo
+```
+
+Reads `.morningstar/run-history.jsonl` (auto-written by every queue run) and prints:
+
+- A weekly-spend bar: `<spend> / <weekly_budget>` for the current ISO week, color-coded against the cap.
+- The last N runs (default 10) with timestamp, scanned/succeeded/failed/skipped, cost, and live-vs-dry mode.
+- Aggregate success rate over the displayed window — color-coded so a glance tells you whether the system is healthy.
+- The most recent PR URLs.
+
+Use this for fast triage before opening GH Actions logs. No external services required — it works offline against the repo.
+
+To see a longer history: `morningstar status -r /path/to/repo --limit 50`.
+
+### Wire up automated alerting (cron + Slack)
+
+```bash
+# crontab -e -- alert if MorningStar is unhealthy
+*/30 * * * * cd /path/to/target-repo && morningstar status --health-check --since 6h --min-runs 3 || curl -X POST -H 'Content-Type: application/json' -d "{\"text\":\"⚠️ MorningStar health check failed (exit $?)\"}" "$SLACK_WEBHOOK"
+```
+
+`--health-check` exit codes: `0` healthy, `1` warning, `2` critical. Defaults: warn at 30% failure rate, critical at 60% failure rate or 90% weekly spend. Tune via `--warn-failure-rate`, `--critical-failure-rate`, `--critical-weekly-pct`, and `--min-runs` (avoids false alarms with tiny samples). Pipe `--json` for richer alert bodies.
+
 ### Pause the 24/7 system
 
 GitHub UI → Actions → `morningstar-scheduled` → ⋯ → **Disable workflow**. The cron stops firing immediately. No other state changes.
@@ -117,6 +143,7 @@ GitHub UI → Actions → `morningstar-scheduled` → ⋯ → **Disable workflow
    - `.agent-logs/task-<id>-retry.json` — retry output (if any)
    - `.agent-logs/task-<id>-answer.json` — Slack Q&A follow-up (if any)
    - `.morningstar/weekly-spend.json` — budget ledger
+   - `.morningstar/run-history.jsonl` — append-only audit trail of every queue run (powers `morningstar status`)
 
 ### Rotate a secret
 

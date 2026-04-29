@@ -313,6 +313,74 @@ morningstar version
 # morningstar 0.1.0
 ```
 
+### `morningstar status`
+
+Show queue health for a repo MorningStar processes — weekly spend bar, recent runs, aggregate success rate, and last PR URLs. Reads `.morningstar/run-history.jsonl` written by every queue run; works offline.
+
+```bash
+morningstar status --repo /path/to/repo
+morningstar status --repo /path/to/repo --limit 25
+morningstar status --repo /path/to/repo --since 24h           # only the last day
+morningstar status --repo /path/to/repo --json | jq           # script-friendly
+morningstar status --repo /path/to/repo --health-check        # cron-friendly exit code
+```
+
+| Option | Default | Notes |
+|--------|---------|-------|
+| `--repo`, `-r` | `.` | Target repo (the one `process-queue` runs against). |
+| `--limit`, `-n` | `10` | How many recent runs to show. Range: 1–100. |
+| `--since` | _none_ | Filter to runs newer than this duration. Accepts `<int><unit>` where unit is `s`, `m`, `h`, or `d` (case-insensitive). Examples: `30m`, `24h`, `7d`. |
+| `--json` | _off_ | Emit a machine-readable JSON snapshot to stdout instead of the Rich dashboard. Banner is suppressed so output is pipe-safe (`jq`, etc.). |
+| `--health-check` | _off_ | Exit non-zero based on thresholds. `0`=healthy, `1`=warning, `2`=critical. Composes with `--json` and `--since`. |
+| `--warn-failure-rate` | `30.0` | Failure-rate %% above which `--health-check` exits 1. |
+| `--critical-failure-rate` | `60.0` | Failure-rate %% above which `--health-check` exits 2. |
+| `--critical-weekly-pct` | `90.0` | Weekly-spend %% above which `--health-check` exits 2. |
+| `--min-runs` | `1` | Skip failure-rate evaluation below this run count (avoids false alarms with tiny samples). |
+| `--weekly-budget` | `200.0` | Only used as a fallback when no run history exists yet. Once history is present, the budget from the most recent run is shown. |
+
+**What you see (default Rich mode):**
+
+- **Weekly spend** — color-coded bar (green < 60% / yellow < 90% / red ≥ 90%) showing `spend / budget` for the current ISO week.
+- **Recent runs** — table with timestamp, items scanned, succeeded, failed, skipped (dry-run), cost, and live/dry mode.
+- **Aggregate health** — total processed, success rate (color-coded ≥ 80% green / ≥ 50% yellow / else red), failed count, total spend across the displayed window.
+- **Recent PRs** — most recent 10 PR URLs across the displayed runs.
+
+**JSON shape (`--json`):**
+
+```jsonc
+{
+  "week_key": "2026-W18",
+  "weekly_spend": 12.50,
+  "weekly_budget": 200.00,
+  "weekly_pct": 6.25,
+  "since": "24h",                  // null if --since was not used
+  "limit": 10,
+  "window": {
+    "runs": 3,
+    "items_processed": 5,
+    "items_succeeded": 4,
+    "items_failed": 1,
+    "success_rate_pct": 80.00,
+    "total_cost": 7.25
+  },
+  "recent_prs": ["https://github.com/.../pull/123"],
+  "runs": [ /* RunRecord per run, oldest-first */ ]
+}
+```
+
+Useful for cron-driven monitoring (post a Slack alert when `success_rate_pct < 50`, when `weekly_pct > 90`, etc.).
+
+**Cron health-check example** (drop into `crontab -e`):
+
+```bash
+# Every 30 min: alert Slack if MorningStar is unhealthy.
+*/30 * * * * cd /path/to/target-repo && morningstar status --health-check --since 6h --min-runs 3 || curl -X POST -H 'Content-Type: application/json' -d "{\"text\":\"⚠️ MorningStar health check failed (exit $?)\"}" "$SLACK_WEBHOOK"
+```
+
+Compose with `--json` to include verdict + reasons in the alert body.
+
+**Empty history**: if no runs have been recorded yet, the command prints a hint to run `morningstar process-queue` first instead of erroring. With `--since`, an empty window prints a "no runs in the last X" message.
+
 ---
 
 ## Model Selection

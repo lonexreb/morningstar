@@ -29,8 +29,8 @@ morningstar run \
 ```
 src/morningstar/
   __init__.py    -- version
-  cli.py         -- typer CLI entry point (run, version, dry-run, process-queue)
-  engine.py      -- core loop + 24/7 queue processor (fetch, plan, execute, commit, PR)
+  cli.py         -- typer CLI entry point (run, version, dry-run, process-queue, status)
+  engine.py      -- core loop + 24/7 queue processor (fetch, plan, execute, commit, PR) + RunRecord history
   banner.py      -- ASCII art banner and branding
 
 morningstar_demo.py  -- standalone walkthrough of process-queue with all I/O mocked
@@ -44,12 +44,14 @@ skills/run|dry-run|version|watch  -- user-facing slash commands
 
 ## Conventions
 
-- `TaskResult` is frozen (immutable). `RunState` is mutable (accumulated in the loop).
+- `TaskResult` and `RunRecord` are frozen (immutable). `RunState` and `QueueResult` are mutable (accumulated in the loop).
 - All Claude CLI calls go through `_run_claude()` in engine.py
 - One-way Slack posts go through `slack_post()` (webhook)
 - Two-way Slack Q&A goes through `slack_post_and_get_reply()` (bot token + polling)
 - Question detection via `parse_question_block()` regex on Claude output
 - Logs written to `<target-repo>/.agent-logs/`
+- Run history written to `<target-repo>/.morningstar/run-history.jsonl` (append-only, capped at 500 records). Surfaced by `morningstar status`.
+- Weekly spend ledger lives at `<target-repo>/.morningstar/weekly-spend.json` (ISO week key + running total).
 - Budget tracked via `RunState.cost` -- includes PRD fetch + task gen + execution
 - All user-supplied inputs are validated before use (model allowlist, webhook URL, task IDs)
 - AI-generated task IDs are sanitized via `_sanitize_task_id()` before filesystem use
@@ -62,7 +64,7 @@ skills/run|dry-run|version|watch  -- user-facing slash commands
 ```bash
 ruff check src/ tests/        # lint (clean)
 mypy src/morningstar/         # type check (clean)
-pytest                        # 117 tests, all passing
+pytest                        # 152 tests, all passing
 python morningstar_demo.py    # zero-credentials pipeline walkthrough
 ```
 

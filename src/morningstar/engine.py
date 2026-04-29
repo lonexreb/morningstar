@@ -968,6 +968,114 @@ def write_weekly_spend(repo_path: Path, week_key: str, spend: float) -> None:
     tmp.replace(path)
 
 
+# ── Run history ──────────────────────────────────────────────
+
+# Cap history file at this many records to keep `status` snappy and avoid
+# unbounded disk growth on long-running 24/7 deployments.
+_RUN_HISTORY_MAX = 500
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    """One queue-processing run, persisted as JSONL for the `status` command.
+
+    Frozen by design: history records are append-only audit data and must not
+    mutate after being written.
+    """
+
+    timestamp: str  # ISO-8601 UTC
+    week_key: str
+    scanned: int
+    processed: int
+    succeeded: int
+    failed: int
+    skipped: int
+    total_cost: float
+    weekly_spend_after: float
+    weekly_budget: float
+    prs_opened: tuple[str, ...]
+    dry_run: bool
+
+    def to_json(self) -> str:
+        return json.dumps({
+            "timestamp": self.timestamp,
+            "week_key": self.week_key,
+            "scanned": self.scanned,
+            "processed": self.processed,
+            "succeeded": self.succeeded,
+            "failed": self.failed,
+            "skipped": self.skipped,
+            "total_cost": round(self.total_cost, 4),
+            "weekly_spend_after": round(self.weekly_spend_after, 4),
+            "weekly_budget": round(self.weekly_budget, 4),
+            "prs_opened": list(self.prs_opened),
+            "dry_run": self.dry_run,
+        })
+
+    @classmethod
+    def from_dict(cls, data: dict) -> RunRecord:
+        return cls(
+            timestamp=str(data.get("timestamp", "")),
+            week_key=str(data.get("week_key", "")),
+            scanned=int(data.get("scanned", 0)),
+            processed=int(data.get("processed", 0)),
+            succeeded=int(data.get("succeeded", 0)),
+            failed=int(data.get("failed", 0)),
+            skipped=int(data.get("skipped", 0)),
+            total_cost=float(data.get("total_cost", 0.0)),
+            weekly_spend_after=float(data.get("weekly_spend_after", 0.0)),
+            weekly_budget=float(data.get("weekly_budget", 0.0)),
+            prs_opened=tuple(data.get("prs_opened", []) or ()),
+            dry_run=bool(data.get("dry_run", False)),
+        )
+
+
+def _run_history_path(repo_path: Path) -> Path:
+    return repo_path / ".morningstar" / "run-history.jsonl"
+
+
+def append_run_history(repo_path: Path, record: RunRecord) -> None:
+    """Append a run record as a JSONL line. Trims to the most recent N records."""
+    path = _run_history_path(repo_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(record.to_json() + "\n")
+
+    # Trim if oversized -- O(N) but N is bounded and writes are infrequent.
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    if len(lines) > _RUN_HISTORY_MAX:
+        kept = lines[-_RUN_HISTORY_MAX:]
+        tmp = path.with_suffix(".jsonl.tmp")
+        tmp.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        tmp.replace(path)
+
+
+def read_run_history(repo_path: Path, *, limit: int | None = None) -> list[RunRecord]:
+    """Return run records, oldest-first. `limit` keeps the most recent N entries."""
+    path = _run_history_path(repo_path)
+    if not path.exists():
+        return []
+    records: list[RunRecord] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(RunRecord.from_dict(json.loads(line)))
+            except (json.JSONDecodeError, ValueError, TypeError):
+                # Skip corrupted lines rather than failing the whole read.
+                continue
+    except OSError:
+        return []
+    if limit is not None and limit >= 0:
+        return records[-limit:]
+    return records
+
+
 # ── Queue orchestrator ───────────────────────────────────────
 
 @dataclass
@@ -1067,9 +1175,34 @@ def _gather_pending(cfg: QueueConfig) -> list[PendingItem]:
     return items
 
 
+def _record_run(cfg: QueueConfig, result: QueueResult, week_key: str,
+                weekly_spend_after: float) -> None:
+    """Persist a RunRecord to the run-history.jsonl file (best-effort)."""
+    record = RunRecord(
+        timestamp=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        week_key=week_key,
+        scanned=result.scanned,
+        processed=result.processed,
+        succeeded=result.succeeded,
+        failed=result.failed,
+        skipped=result.skipped,
+        total_cost=result.total_cost,
+        weekly_spend_after=weekly_spend_after,
+        weekly_budget=cfg.weekly_budget,
+        prs_opened=tuple(result.prs_opened),
+        dry_run=cfg.dry_run,
+    )
+    try:
+        append_run_history(cfg.repo_path, record)
+    except OSError as e:
+        # History writes must never break a queue run.
+        logger.warning("Failed to append run history: %s", e)
+
+
 def process_queue(cfg: QueueConfig) -> QueueResult:
     """Scan Notion + Jira for pending items and run each one end-to-end."""
     result = QueueResult()
+    week_key, spend_so_far = read_weekly_spend(cfg.repo_path)
 
     pending = _gather_pending(cfg)
     result.scanned = len(pending)
@@ -1078,15 +1211,16 @@ def process_queue(cfg: QueueConfig) -> QueueResult:
         logger.info("No pending items.")
         if cfg.slack_webhook:
             slack_post(cfg.slack_webhook, "MorningStar queue: no pending items.")
+        _record_run(cfg, result, week_key, spend_so_far)
         return result
 
-    week_key, spend_so_far = read_weekly_spend(cfg.repo_path)
     if spend_so_far >= cfg.weekly_budget:
         msg = (f"Weekly budget exhausted ({spend_so_far:.2f}/{cfg.weekly_budget:.2f} "
                f"for {week_key}). Skipping run.")
         logger.warning(msg)
         if cfg.slack_webhook:
             slack_post(cfg.slack_webhook, f":warning: {msg}")
+        _record_run(cfg, result, week_key, spend_so_far)
         return result
 
     if cfg.slack_webhook:
@@ -1211,7 +1345,9 @@ def process_queue(cfg: QueueConfig) -> QueueResult:
                 + (f"\n{pr_url}" if pr_url else ""),
             )
 
-    write_weekly_spend(cfg.repo_path, week_key, spend_so_far + result.total_cost)
+    weekly_spend_after = spend_so_far + result.total_cost
+    write_weekly_spend(cfg.repo_path, week_key, weekly_spend_after)
+    _record_run(cfg, result, week_key, weekly_spend_after)
 
     if cfg.slack_webhook:
         slack_post(
@@ -1219,7 +1355,7 @@ def process_queue(cfg: QueueConfig) -> QueueResult:
             f"MorningStar queue run complete: {result.succeeded} succeeded, "
             f"{result.failed} failed, {result.skipped} skipped. "
             f"Run cost ${result.total_cost:.2f}. "
-            f"Week {week_key}: ${spend_so_far + result.total_cost:.2f}/"
+            f"Week {week_key}: ${weekly_spend_after:.2f}/"
             f"${cfg.weekly_budget:.2f}.",
         )
 

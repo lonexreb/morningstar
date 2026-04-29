@@ -1,7 +1,7 @@
 {
   "name": "morningstar",
   "version": "0.1.0",
-  "description": "Autonomous coding agent that turns Notion and Jira PRDs into shipped pull requests. Reads requirements, analyzes the codebase, generates a task plan, implements each task with tests, commits, and opens a PR. Includes a 24/7 GitHub Actions queue processor and two-way Slack Q&A.",
+  "description": "Autonomous coding agent that turns Notion and Jira PRDs into shipped pull requests. Reads requirements, analyzes the codebase, generates a task plan, implements each task with tests, commits, and opens a PR. Includes a 24/7 GitHub Actions queue processor, two-way Slack Q&A, and a built-in `status` command for weekly spend, run history, and PR audit.",
   "author": {
     "name": "Shubhankar Tripathy",
     "url": "https://github.com/lonexreb"
@@ -24,7 +24,9 @@
     "automation",
     "background-agent",
     "ai-agent",
-    "anthropic"
+    "anthropic",
+    "agent-observability",
+    "run-history"
   ],
   "skills": "./skills/",
   "agents": "./agents/"

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import datetime as _dt
+import json as _json
+import re as _re
 from pathlib import Path
 
 import typer
@@ -19,6 +22,8 @@ from morningstar.engine import (
     fetch_prd,
     generate_tasks,
     process_queue,
+    read_run_history,
+    read_weekly_spend,
     slack_post,
     validate_bot_token,
     validate_model,
@@ -458,6 +463,353 @@ def process_queue_cmd(
 
     if result.failed > 0 and result.succeeded == 0:
         raise typer.Exit(1)
+
+
+_DURATION_RE = _re.compile(r"^\s*(\d+)\s*([smhd])\s*$", _re.IGNORECASE)
+
+
+def _parse_duration(text: str) -> _dt.timedelta:
+    """Parse '30s' / '10m' / '24h' / '7d' into a timedelta.
+
+    Case-insensitive. Raises ValueError on malformed input.
+    """
+    match = _DURATION_RE.match(text)
+    if not match:
+        raise ValueError(
+            f"Invalid duration {text!r}. Expected '<int><unit>' where unit is "
+            "s, m, h, or d (e.g. '24h', '7d')."
+        )
+    n = int(match.group(1))
+    unit = match.group(2).lower()
+    if unit == "s":
+        return _dt.timedelta(seconds=n)
+    if unit == "m":
+        return _dt.timedelta(minutes=n)
+    if unit == "h":
+        return _dt.timedelta(hours=n)
+    return _dt.timedelta(days=n)
+
+
+def _filter_since(records: list, since: str | None) -> list:
+    """Keep records whose ISO timestamp >= now - duration. Bad timestamps are kept."""
+    if not since:
+        return records
+    delta = _parse_duration(since)
+    cutoff = _dt.datetime.now(_dt.timezone.utc) - delta
+    kept = []
+    for rec in records:
+        try:
+            ts = _dt.datetime.fromisoformat(rec.timestamp)
+        except (ValueError, TypeError):
+            kept.append(rec)
+            continue
+        if ts >= cutoff:
+            kept.append(rec)
+    return kept
+
+
+def _evaluate_health(
+    *,
+    total_processed: int,
+    failure_rate: float,
+    weekly_pct: float,
+    min_runs: int,
+    warn_failure_rate: float,
+    critical_failure_rate: float,
+    critical_weekly_pct: float,
+) -> tuple[str, list[str]]:
+    """Determine ('healthy' | 'warning' | 'critical', list of reasons).
+
+    Failure-rate thresholds only fire once `min_runs` items have been processed
+    in the window -- avoids false alarms during a quiet stretch (and the first
+    boot of a new repo).
+    """
+    reasons: list[str] = []
+    verdict = "healthy"
+
+    if weekly_pct >= critical_weekly_pct:
+        verdict = "critical"
+        reasons.append(
+            f"weekly spend at {weekly_pct:.1f}% (>= {critical_weekly_pct:.0f}%)"
+        )
+
+    if total_processed >= min_runs:
+        if failure_rate >= critical_failure_rate:
+            verdict = "critical"
+            reasons.append(
+                f"failure rate {failure_rate:.1f}% "
+                f"(>= {critical_failure_rate:.0f}%)"
+            )
+        elif failure_rate >= warn_failure_rate and verdict != "critical":
+            verdict = "warning"
+            reasons.append(
+                f"failure rate {failure_rate:.1f}% "
+                f"(>= {warn_failure_rate:.0f}%)"
+            )
+
+    return verdict, reasons
+
+
+def _verdict_exit_code(verdict: str) -> int:
+    return {"healthy": 0, "warning": 1, "critical": 2}.get(verdict, 0)
+
+
+@app.command()
+def status(
+    repo: Path = typer.Option(
+        Path("."),
+        "--repo",
+        "-r",
+        help="Target repository (the one MorningStar processes).",
+        exists=True,
+        dir_okay=True,
+        file_okay=False,
+        resolve_path=True,
+    ),
+    limit: int = typer.Option(
+        10,
+        "--limit",
+        "-n",
+        min=1,
+        max=100,
+        help="Number of recent runs to display.",
+    ),
+    weekly_budget: float = typer.Option(
+        200.0,
+        "--weekly-budget",
+        envvar="MORNINGSTAR_WEEKLY_BUDGET",
+        min=0.01,
+        help="Weekly budget for the spend bar (only used when no run history exists).",
+    ),
+    since: str = typer.Option(
+        "",
+        "--since",
+        help="Only include runs newer than this duration (e.g. '24h', '7d').",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit a machine-readable JSON snapshot instead of a Rich dashboard.",
+    ),
+    health_check: bool = typer.Option(
+        False,
+        "--health-check",
+        help=(
+            "Exit non-zero based on thresholds. 0 = healthy, 1 = warning, "
+            "2 = critical. Composes with --json for cron alerts."
+        ),
+    ),
+    warn_failure_rate: float = typer.Option(
+        30.0,
+        "--warn-failure-rate",
+        min=0.0,
+        max=100.0,
+        help="Failure-rate %% above which --health-check exits 1.",
+    ),
+    critical_failure_rate: float = typer.Option(
+        60.0,
+        "--critical-failure-rate",
+        min=0.0,
+        max=100.0,
+        help="Failure-rate %% above which --health-check exits 2.",
+    ),
+    critical_weekly_pct: float = typer.Option(
+        90.0,
+        "--critical-weekly-pct",
+        min=0.0,
+        max=100.0,
+        help="Weekly-spend %% above which --health-check exits 2.",
+    ),
+    min_runs: int = typer.Option(
+        1,
+        "--min-runs",
+        min=0,
+        help="Skip --health-check failure-rate evaluation below this run count.",
+    ),
+) -> None:
+    """Show queue health: weekly spend, recent runs, last PRs opened."""
+    week_key, spend_so_far = read_weekly_spend(repo)
+
+    # `--since` filters first, `--limit` then trims the most recent N. Reading
+    # all records is fine -- the file is capped at 500.
+    all_history = read_run_history(repo)
+    if since:
+        try:
+            all_history = _filter_since(all_history, since)
+        except ValueError as e:
+            console.print(f"[bold red]Error:[/bold red] {e}")
+            raise typer.Exit(1) from e
+    history = all_history[-limit:] if limit else all_history
+
+    # Prefer the budget from the most recent run record so the bar reflects
+    # what actually constrained the system, not the CLI default.
+    budget = history[-1].weekly_budget if history else weekly_budget
+    pct = min(100.0, (spend_so_far / budget) * 100.0) if budget > 0 else 0.0
+
+    total_processed = sum(r.processed for r in history)
+    total_succeeded = sum(r.succeeded for r in history)
+    total_failed = sum(r.failed for r in history)
+    total_cost = sum(r.total_cost for r in history)
+    success_rate = (
+        (total_succeeded / total_processed) * 100.0 if total_processed else 0.0
+    )
+    recent_prs = [pr for rec in reversed(history) for pr in rec.prs_opened][:10]
+
+    failure_rate = 100.0 - success_rate if total_processed else 0.0
+    health_verdict, health_reasons = _evaluate_health(
+        total_processed=total_processed,
+        failure_rate=failure_rate,
+        weekly_pct=pct,
+        min_runs=min_runs,
+        warn_failure_rate=warn_failure_rate,
+        critical_failure_rate=critical_failure_rate,
+        critical_weekly_pct=critical_weekly_pct,
+    )
+
+    if json_output:
+        payload = {
+            "week_key": week_key,
+            "weekly_spend": round(spend_so_far, 4),
+            "weekly_budget": round(budget, 4),
+            "weekly_pct": round(pct, 2),
+            "since": since or None,
+            "limit": limit,
+            "window": {
+                "runs": len(history),
+                "items_processed": total_processed,
+                "items_succeeded": total_succeeded,
+                "items_failed": total_failed,
+                "success_rate_pct": round(success_rate, 2),
+                "failure_rate_pct": round(failure_rate, 2),
+                "total_cost": round(total_cost, 4),
+            },
+            "health": {
+                "verdict": health_verdict,  # "healthy" | "warning" | "critical"
+                "exit_code": _verdict_exit_code(health_verdict),
+                "reasons": health_reasons,
+            },
+            "recent_prs": recent_prs,
+            "runs": [
+                {
+                    "timestamp": r.timestamp,
+                    "week_key": r.week_key,
+                    "scanned": r.scanned,
+                    "processed": r.processed,
+                    "succeeded": r.succeeded,
+                    "failed": r.failed,
+                    "skipped": r.skipped,
+                    "total_cost": round(r.total_cost, 4),
+                    "weekly_spend_after": round(r.weekly_spend_after, 4),
+                    "weekly_budget": round(r.weekly_budget, 4),
+                    "prs_opened": list(r.prs_opened),
+                    "dry_run": r.dry_run,
+                }
+                for r in history
+            ],
+        }
+        # print() (not console.print) keeps stdout pristine for piping into jq.
+        print(_json.dumps(payload, indent=2))
+        if health_check:
+            raise typer.Exit(_verdict_exit_code(health_verdict))
+        return
+
+    print_banner(console)
+
+    bar_width = 30
+    filled = int(round(bar_width * pct / 100.0))
+    bar = "█" * filled + "░" * (bar_width - filled)
+    bar_color = "green" if pct < 60 else "yellow" if pct < 90 else "red"
+
+    spend_panel = Panel.fit(
+        f"[bold]Week[/bold] {week_key}\n"
+        f"[{bar_color}]{bar}[/{bar_color}] {pct:5.1f}%\n"
+        f"[bold]${spend_so_far:.2f}[/bold] / ${budget:.2f}"
+        + (f"\n[dim]Window: --since {since}[/dim]" if since else ""),
+        title="Weekly spend",
+        border_style="bright_yellow",
+    )
+    console.print(spend_panel)
+
+    if not history:
+        if since:
+            console.print(
+                f"[dim]No runs in the last {since}. Try a wider window or "
+                f"check `morningstar process-queue` is firing.[/dim]"
+            )
+        else:
+            console.print(
+                "[dim]No run history yet. "
+                "Run [bold]morningstar process-queue[/bold] to start.[/dim]"
+            )
+        return
+
+    runs_table = Table(
+        title=f"Recent runs (last {len(history)})",
+        border_style="bright_yellow",
+        show_lines=False,
+    )
+    runs_table.add_column("Time (UTC)", style="dim", no_wrap=True)
+    runs_table.add_column("Scanned", justify="right")
+    runs_table.add_column("OK", justify="right", style="green")
+    runs_table.add_column("Fail", justify="right", style="red")
+    runs_table.add_column("Skip", justify="right", style="cyan")
+    runs_table.add_column("Cost", justify="right", style="yellow")
+    runs_table.add_column("Mode", justify="center")
+
+    for rec in reversed(history):
+        runs_table.add_row(
+            rec.timestamp.replace("+00:00", "Z"),
+            str(rec.scanned),
+            str(rec.succeeded),
+            str(rec.failed),
+            str(rec.skipped),
+            f"${rec.total_cost:.2f}",
+            "dry" if rec.dry_run else "live",
+        )
+    console.print(runs_table)
+
+    health_color = (
+        "green" if success_rate >= 80 or total_processed == 0
+        else "yellow" if success_rate >= 50
+        else "red"
+    )
+    summary = Table(border_style="bright_blue", show_header=False)
+    summary.add_column("Metric", style="dim")
+    summary.add_column("Value", style="bold")
+    summary.add_row("Window", f"{len(history)} run(s)")
+    summary.add_row("Items processed", str(total_processed))
+    summary.add_row(
+        "Success rate", f"[{health_color}]{success_rate:.1f}%[/{health_color}]"
+    )
+    summary.add_row("Items failed", f"[red]{total_failed}[/red]")
+    summary.add_row("Total cost (window)", f"${total_cost:.2f}")
+    console.print(summary)
+
+    if recent_prs:
+        prs_table = Table(
+            title="Recent PRs (most recent first)",
+            border_style="bright_green",
+            show_header=False,
+        )
+        prs_table.add_column("URL", style="cyan")
+        for pr in recent_prs:
+            prs_table.add_row(pr)
+        console.print(prs_table)
+
+    if health_check:
+        verdict_color = {
+            "healthy": "green",
+            "warning": "yellow",
+            "critical": "red",
+        }[health_verdict]
+        reason_text = (
+            "; ".join(health_reasons) if health_reasons else "all thresholds OK"
+        )
+        console.print(
+            f"[bold {verdict_color}]Health: {health_verdict.upper()}[/bold "
+            f"{verdict_color}] -- {reason_text}"
+        )
+        raise typer.Exit(_verdict_exit_code(health_verdict))
 
 
 def main() -> None:

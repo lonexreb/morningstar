@@ -33,6 +33,12 @@ Give it a Notion page (or a Jira ticket) and a target repo. It reads the require
 
 ---
 
+## Recent changes
+
+- **#37** Migrated `fetch_pending_jira` from deprecated `GET /rest/api/3/search` to `POST /rest/api/3/search/jql`.
+
+---
+
 ## Install
 
 ### As a Claude Code Plugin (recommended)
